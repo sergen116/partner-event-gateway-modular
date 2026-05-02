@@ -98,6 +98,34 @@ order-cancelled:  targetQueryValue: 50     # scale aggressively on any backlog
 A traffic burst of OrderCreated events scales `consumer-order-created` from 2 to 10 pods
 without touching the other 4 consumer deployments. Cost goes where load goes.
 
+## When one event type still saturates
+
+Per-event-type Deployments and KEDA scaling resolve unbalanced load *across* event
+types — one bursty type scales independently of the others. They do not resolve a
+single event type whose own queue saturates the per-table contention ceiling. Symptom:
+`consumer-order-created` is pinned at `max: 10`, queue depth still climbs, the other
+four consumers stay idle.
+
+More pods stop helping because a single pgmq queue is one Postgres heap and one
+B-tree. Concurrent writes contend on the tail page regardless of how many consumer
+pods read from it — the bottleneck is per-heap, not per-worker.
+
+The lever is to shard *that one* queue into N child queues
+(`order_created_shard_0` … `order_created_shard_15`), routing each event by
+`hash(partner_id) % N` at insert time. Result: N heaps, N hot tails, writes distribute
+by 1/N. KEDA still applies — it now scales 16 ScaledObjects, one per shard queue, with
+the same `targetQueryValue`.
+
+`partner_id` (not random, not time) is the right routing key for two reasons. It is
+uncorrelated with time, so all shards stay hot in parallel rather than rotating
+one-at-a-time the way time-based routing does (see `07-scaling-bottlenecks.md`). And
+per-partner ordering is preserved: every event for partner X lands on the same shard,
+so one consumer processes that partner's stream in order.
+
+Surgical, not blanket — apply only to the saturated event type; leave the other four
+single-queue. When sharding pgmq becomes operationally heavier than the alternative,
+that one queue migrates to Kafka (see `09-actual-scaling-bottlenecks.md`, Layer 5).
+
 ## What doesn't change between Stage 1 and Stage 2
 
 The application code, the Docker image, the database schema, the migrations, the
