@@ -5,7 +5,8 @@
 -- =============================================================
 
 CREATE EXTENSION IF NOT EXISTS pgmq CASCADE;
-CREATE EXTENSION IF NOT EXISTS pg_partman;
+CREATE SCHEMA IF NOT EXISTS partman;
+CREATE EXTENSION IF NOT EXISTS pg_partman SCHEMA partman;
 
 -- Partners --------------------------------------------------------
 -- secret_hash holds SHA-256 hex of the partner's secret. The partner sends
@@ -78,10 +79,12 @@ SELECT partman.create_parent(
     p_premake      => 4
 );
 
--- Retention: 12 months. Events older than this are dropped (whole partition,
--- O(1) cost). retention_keep_table=true preserves detached partitions for
--- cold-tier archival rather than destroying them outright — operations can
--- pg_dump and ship to S3 before the actual DROP.
+-- Retention: 12 months. Once a partition's range is entirely older than 12
+-- months, pg_partman_bgw DETACHes it from `events` (O(1)) and leaves the
+-- underlying table standalone — retention_keep_table=true preserves it for
+-- cold-tier archival rather than dropping it outright. Operations pg_dump
+-- the detached table to S3, then DROP TABLE manually. retention_keep_index
+-- =false drops indexes on the detached table to save disk.
 UPDATE partman.part_config
 SET
     retention                = '12 months',

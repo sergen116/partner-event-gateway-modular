@@ -56,8 +56,9 @@ SELECT partman.create_parent(
 );
 
 -- 24-month retention. Audit data outlives operational data — by the time the
--- events row's partition is dropped (12 months), there are still 12 more
--- months of audit history available for compliance lookups.
+-- corresponding events partition is detached (12 months), there are still 12
+-- more months of audit history available for compliance lookups. Same
+-- detach-but-keep-table semantics as the events table (see V1).
 UPDATE partman.part_config
 SET
     retention                = '24 months',
