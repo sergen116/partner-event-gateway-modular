@@ -363,20 +363,40 @@ operations rarely need this in practice.
 
 ### ADR-007: Specifications without JPA
 
-**Decision:** Implement a Specifications-style filter framework
-(`EventSpecifications`) without pulling in JPA.
+**Decision:** The persistence layer is JdbcTemplate + raw SQL throughout —
+no JPA, no Hibernate, no Spring Data JPA. Dynamic event filtering is
+implemented in `EventSpecifications` as a registry of small functions that
+compile into SQL fragments and bound parameters.
 
-**Why:** The case spec demands "the design should be extensible so that new
-filtering criteria can be added later." The canonical Java answer is Spring
-Data's `Specification<T>`, but JPA brings significant runtime overhead
-(first-level cache, dirty checking, lazy proxies) that doesn't fit a
-high-throughput ingest path. Our `EventSpecifications` API is intentionally
-shaped like JPA's: a registry of small functions that compile to SQL
-fragments + bound parameters. Adding a filter is one line.
+**Why no JPA at all:**
 
-**Trade-off:** Ours is bespoke rather than the standard JPA API, so a
-developer who knows JPA Specifications by reflex has to read the code.
-Mitigated by the registry being literally five lines.
+- **pgmq is JDBC-native.** Core operations (`pgmq.send`, `pgmq.read`,
+  `pgmq.archive`) are SQL function calls; the outbox poller and workers
+  use `SELECT … FOR UPDATE SKIP LOCKED`. JPA can't express these
+  idiomatically — every pgmq touch point would drop to
+  `@Query(nativeQuery=true)` regardless. Adopting JPA would produce a
+  hybrid stack (JPA for entities + JDBC for pgmq) where one stack already
+  does the job.
+- **Few tables, no object graph.** Five tables (`partners`, `events`,
+  `event_outbox`, `event_audit_log`, plus pgmq's internal tables) with
+  deliberately no FKs between the audit, outbox, and events tables (see
+  the ERD doc). JPA's value — transparent navigation of `@OneToMany` /
+  `@ManyToOne` — has nothing to navigate here.
+- **One dependency, one mental model.** Adding JPA means two transaction
+  managers (or a chained one), two result-mapping styles, plus Hibernate's
+  runtime overhead (first-level cache, dirty checking, lazy proxies) that
+  buys nothing on a high-throughput ingest path with no entity graph.
+
+**Why hand-rolled Specifications:** The case spec calls for an extensible
+filter API. We needed the *pattern* — composable optional predicates — not
+the JPA implementation of it. `EventSpecifications` is a five-line registry
+where adding a filter is one line plus one `EventQuery` field. SQL stays
+one read away, which matters for keeping queries partition-prunable on the
+monthly-partitioned `events` table.
+
+**Trade-off:** Developers who reach for `JpaSpecificationExecutor` by
+reflex have to read the module to recognise the pattern. Mitigated by the
+registry being literally five lines and the design being documented here.
 
 ### ADR-008: Monthly partitioning for events and audit
 

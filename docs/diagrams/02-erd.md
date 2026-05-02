@@ -19,7 +19,7 @@ erDiagram
     }
 
     events {
-        BIGSERIAL   id                  PK_part
+        BIGSERIAL   id                  PK
         TEXT        partner_id          FK
         UUID        event_id
         TEXT        event_type          "ORDER_CREATED, ..."
@@ -27,19 +27,19 @@ erDiagram
         JSONB       payload
         TEXT        status              "RECEIVED, PENDING, PROCESSING, PROCESSED, FAILED"
         TEXT        error
-        TIMESTAMPTZ created_at          PK_part_key
+        TIMESTAMPTZ created_at          PK "partition key"
         TIMESTAMPTZ processed_at
     }
 
     event_audit_log {
-        BIGSERIAL   id                  PK_part
+        BIGSERIAL   id                  PK
         TEXT        partner_id
         UUID        event_id
         TEXT        from_status         "null on initial RECEIVED"
         TEXT        to_status
         TEXT        actor               "ingest, outbox-poller, worker:order-created..."
         TEXT        error               "captured on FAILED transitions"
-        TIMESTAMPTZ occurred_at         PK_part_key
+        TIMESTAMPTZ occurred_at         PK "partition key"
     }
 
     event_outbox {
@@ -56,8 +56,11 @@ erDiagram
 
 ## Partitioning
 
-Two of these tables are partitioned. The `_part` suffix on primary keys
-denotes that the partition key is part of the PK by Postgres requirement.
+Two of these tables are partitioned. Their primary keys are composite —
+`(id, created_at)` for `events` and `(id, occurred_at)` for `event_audit_log` —
+because Postgres requires the partition key to be part of every unique
+constraint on a partitioned table. The diagram marks both columns with `PK`;
+the `created_at` / `occurred_at` column is also the partition key.
 
 | Table | Partition key | Interval | Retention | Cleanup |
 |---|---|---|---|---|
