@@ -300,15 +300,40 @@ simplification — strictly better than plaintext, worse than KMS-backed.
 **Decision:** API writes events row + outbox row in one transaction; a
 separate poller forwards outbox rows into pgmq.
 
-**Why:** Without outbox, a JVM crash between `INSERT INTO events` (committed)
-and `pgmq.send` (failed) orphans the event. With outbox, the API's commit is
-the source of truth and queue delivery is eventually consistent. Even in a
-same-DB setup where atomicity is technically equivalent, the outbox
-decouples API latency from queue health, isolates failures, and makes the
-delivery pipeline queryable.
+**Atomicity is not the reason.** Because pgmq is just a set of Postgres
+tables in the same database, `INSERT INTO events` and `pgmq.send` *can*
+share a single transaction — both commit or both roll back. The classical
+"dual-write" problem (DB write + message broker call to a different
+system) does not exist here. A direct `pgmq.send` inside the ingest
+transaction would be atomic by Postgres ACID alone.
 
-**Trade-off:** Adds latency (one polling interval, ~250ms median) between
-API ack and queue delivery. Acceptable for an event ingest gateway.
+**Why outbox anyway.** Three specific properties that direct send doesn't
+provide:
+
+1. **Future-proofing for external brokers.** If we eventually swap pgmq
+   for Kafka, SQS, or any non-Postgres broker, the ingest path stays
+   unchanged. Only the relay (`OutboxPoller`) needs to be rewritten — a
+   single background component, not the API hot path.
+2. **Shorter ingest transactions and bloat isolation.** Direct send keeps
+   the API transaction open across `pgmq.send`'s extension code and pgmq
+   table writes. Outbox keeps the API transaction down to two plain
+   INSERTs (events + outbox) and moves the pgmq churn — including its
+   eventual vacuum cost — into the poller's transaction, off the
+   partner-facing path.
+3. **Separation of concerns.** The ingest module never imports pgmq; it
+   writes a queue-agnostic JSON payload to `event_outbox`. Only the
+   delivery module knows about pgmq, which keeps modular boundaries clean
+   and means ingest's tests don't need pgmq running.
+
+**Trade-off:** ~250 ms median forwarding latency between API ack and
+queue arrival (one poll interval). Partner sees 200 OK as soon as the row
+is durably accepted; queue delivery is eventually consistent. Acceptable
+for an event ingest gateway.
+
+For the long-form per-concern breakdown — six operational distinctions,
+an incident simulator, and the at-a-glance scorecard — see
+[`docs/diagrams/08-outbox-vs-direct-pgmq.md`](diagrams/08-outbox-vs-direct-pgmq.md)
+and [`docs/diagrams/10-outbox-scorecard.md`](diagrams/10-outbox-scorecard.md).
 
 ### ADR-003: Per-event-type queues
 
@@ -386,6 +411,12 @@ compile into SQL fragments and bound parameters.
   managers (or a chained one), two result-mapping styles, plus Hibernate's
   runtime overhead (first-level cache, dirty checking, lazy proxies) that
   buys nothing on a high-throughput ingest path with no entity graph.
+- **Already Postgres-locked.** pgmq is a Postgres extension, so the system
+  is committed to Postgres permanently. JPA's main portability promise —
+  "swap the DB vendor without rewriting queries" — has nothing to deliver
+  here. Postgres-specific SQL (`FOR UPDATE SKIP LOCKED`, partial indexes,
+  `JSONB`, partitioning DDL, `pgmq.*` functions) is used freely with no
+  vendor-neutrality cost.
 
 **Why hand-rolled Specifications:** The case spec calls for an extensible
 filter API. We needed the *pattern* — composable optional predicates — not
