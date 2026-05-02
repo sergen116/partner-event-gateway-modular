@@ -1,0 +1,239 @@
+{
+  "info": {
+    "name": "Partner Event Gateway",
+    "description": "Submit and query events through the Partner Event Gateway. Pre-request scripts compute the HMAC-SHA256 signature automatically. Configure the collection variables to switch partners or environments.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "_postman_id": "11111111-2222-3333-4444-555555555555"
+  },
+  "variable": [
+    { "key": "baseUrl",   "value": "http://localhost:8080", "type": "string" },
+    { "key": "partnerId", "value": "partner-acme",          "type": "string" },
+    { "key": "secret",    "value": "acme-shared-secret-2024", "type": "string" }
+  ],
+  "auth": {
+    "type": "noauth"
+  },
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Pre-request: compute HMAC-SHA256 signature for the partner endpoints.",
+          "// Skips internal/swagger/actuator paths.",
+          "const url = pm.request.url.toString();",
+          "if (url.indexOf('/api/v1/events') === -1) { return; }",
+          "if (url.indexOf('/api/v1/internal') !== -1) { return; }",
+          "",
+          "const partnerId = pm.collectionVariables.get('partnerId');",
+          "const secret = pm.collectionVariables.get('secret');",
+          "",
+          "const ts = new Date().toISOString();",
+          "const method = pm.request.method.toUpperCase();",
+          "const path = pm.request.url.getPathWithQuery ? pm.request.url.getPath() : ('/' + (pm.request.url.path || []).join('/'));",
+          "const body = pm.request.body && pm.request.body.raw ? pm.request.body.raw : '';",
+          "",
+          "// Derive HMAC key = SHA-256(secret) -> bytes",
+          "const keyHex = CryptoJS.SHA256(secret).toString(CryptoJS.enc.Hex);",
+          "const keyWordArray = CryptoJS.enc.Hex.parse(keyHex);",
+          "",
+          "// Canonical message: partnerId\\n ts\\n METHOD\\n path\\n body",
+          "const canonical = partnerId + '\\n' + ts + '\\n' + method + '\\n' + path + '\\n' + body;",
+          "",
+          "const sig = CryptoJS.HmacSHA256(canonical, keyWordArray).toString(CryptoJS.enc.Base64);",
+          "",
+          "pm.request.headers.upsert({ key: 'X-Partner-Id', value: partnerId });",
+          "pm.request.headers.upsert({ key: 'X-Timestamp',  value: ts });",
+          "pm.request.headers.upsert({ key: 'X-Signature',  value: sig });"
+        ]
+      }
+    }
+  ],
+  "item": [
+    {
+      "name": "Partner endpoints",
+      "item": [
+        {
+          "name": "Submit event — OrderCreated",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "{{$guid}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"eventType\": \"OrderCreated\",\n  \"businessRef\": \"ORD-2024-001\",\n  \"payload\": {\n    \"orderId\": \"ORD-2024-001\",\n    \"customerId\": \"CUST-42\",\n    \"items\": [\n      { \"sku\": \"WIDGET-1\", \"qty\": 2, \"price\": 19.99 }\n    ],\n    \"total\": 39.98\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/events",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "events"]
+            },
+            "description": "Submit an OrderCreated event. The Idempotency-Key is auto-generated; replay the request with the same key to test idempotency."
+          }
+        },
+        {
+          "name": "Submit event — ShipmentStatusUpdated",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "{{$guid}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"eventType\": \"ShipmentStatusUpdated\",\n  \"businessRef\": \"SHIP-2024-001\",\n  \"payload\": {\n    \"shipmentId\": \"SHIP-2024-001\",\n    \"status\": \"in_transit\",\n    \"carrier\": \"UPS\",\n    \"trackingNumber\": \"1Z999AA10123456784\"\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/events",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "events"]
+            }
+          }
+        },
+        {
+          "name": "Submit event — ReturnRequested",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "{{$guid}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"eventType\": \"ReturnRequested\",\n  \"businessRef\": \"RET-2024-001\",\n  \"payload\": {\n    \"orderId\": \"ORD-2024-001\",\n    \"reason\": \"defective\",\n    \"requestedRefund\": 39.98\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/events",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "events"]
+            }
+          }
+        },
+        {
+          "name": "Submit event — DeliveryAddressUpdated",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "{{$guid}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"eventType\": \"DeliveryAddressUpdated\",\n  \"businessRef\": \"ORD-2024-001\",\n  \"payload\": {\n    \"orderId\": \"ORD-2024-001\",\n    \"newAddress\": {\n      \"line1\": \"123 New Street\",\n      \"city\": \"Istanbul\",\n      \"country\": \"TR\"\n    }\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/events",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "events"]
+            }
+          }
+        },
+        {
+          "name": "Submit event — OrderCancelled",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "{{$guid}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"eventType\": \"OrderCancelled\",\n  \"businessRef\": \"ORD-2024-001\",\n  \"payload\": {\n    \"orderId\": \"ORD-2024-001\",\n    \"reason\": \"customer_request\"\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/events",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "events"]
+            }
+          }
+        },
+        {
+          "name": "Query own events",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/events?page=0&size=20",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "events"],
+              "query": [
+                { "key": "page", "value": "0" },
+                { "key": "size", "value": "20" },
+                { "key": "eventType",         "value": "OrderCreated", "disabled": true },
+                { "key": "status",            "value": "PROCESSED",    "disabled": true },
+                { "key": "businessRef",       "value": "ORD-2024-001", "disabled": true },
+                { "key": "from",              "value": "2024-01-01T00:00:00Z", "disabled": true },
+                { "key": "to",                "value": "2024-12-31T23:59:59Z", "disabled": true },
+                { "key": "processingOutcome", "value": "FAILED",       "disabled": true }
+              ]
+            },
+            "description": "Returns the calling partner's events with optional filters. Enable query params for filter combinations."
+          }
+        },
+        {
+          "name": "Get specific event",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/events/{{eventId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "events", "{{eventId}}"]
+            },
+            "description": "Retrieve a single event by ID. Set {{eventId}} as a collection or environment variable."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Internal endpoints (no auth)",
+      "item": [
+        {
+          "name": "Query all partners",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/internal/events?page=0&size=50",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "internal", "events"],
+              "query": [
+                { "key": "page", "value": "0" },
+                { "key": "size", "value": "50" },
+                { "key": "partnerId", "value": "partner-acme",   "disabled": true },
+                { "key": "eventType", "value": "OrderCreated",   "disabled": true },
+                { "key": "status",    "value": "PROCESSED",      "disabled": true }
+              ]
+            },
+            "description": "Cross-partner query. No HMAC required (per case spec — internal user auth out of scope)."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Observability",
+      "item": [
+        {
+          "name": "Health",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/actuator/health", "host": ["{{baseUrl}}"], "path": ["actuator", "health"] }
+          }
+        },
+        {
+          "name": "Metrics (Prometheus)",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/actuator/prometheus", "host": ["{{baseUrl}}"], "path": ["actuator", "prometheus"] }
+          }
+        },
+        {
+          "name": "Swagger UI",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/swagger-ui.html", "host": ["{{baseUrl}}"], "path": ["swagger-ui.html"] }
+          }
+        }
+      ]
+    }
+  ]
+}

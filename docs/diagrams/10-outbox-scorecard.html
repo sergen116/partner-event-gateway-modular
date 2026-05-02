@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Outbox vs direct pgmq.send — summary scorecard</title>
+<style>
+  :root {
+    --bg: #FAF9F7;
+    --fg: #2C2C2A;
+    --muted: #5F5E5A;
+    --tertiary: #888780;
+    --surface: #FFFFFF;
+    --surface-2: #F1EFE8;
+    --border: rgba(60, 60, 58, 0.15);
+    --border-strong: rgba(60, 60, 58, 0.3);
+    --info: #185FA5;
+    --success: #0F6E56;
+    --danger: #A32D2D;
+    --teal-bg: #E1F5EE;
+    --teal-fg: #085041;
+    --coral-bg: #FAECE7;
+    --coral-fg: #712B13;
+    --radius-md: 8px;
+    --radius-lg: 12px;
+    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1A1A18;
+      --fg: #E5E3DB;
+      --muted: #B4B2A9;
+      --tertiary: #888780;
+      --surface: #232321;
+      --surface-2: #2C2C2A;
+      --border: rgba(229, 227, 219, 0.15);
+      --border-strong: rgba(229, 227, 219, 0.3);
+      --info: #85B7EB;
+      --success: #5DCAA5;
+      --danger: #F09595;
+      --teal-bg: #085041;
+      --teal-fg: #9FE1CB;
+      --coral-bg: #712B13;
+      --coral-fg: #F5C4B3;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--font-sans);
+    font-size: 16px;
+    line-height: 1.6;
+    padding: 2rem 1rem 4rem;
+  }
+  main { max-width: 760px; margin: 0 auto; }
+
+  h1 { font-size: 22px; font-weight: 500; margin: 0 0 8px; }
+  .top-meta { font-size: 13px; color: var(--tertiary); margin: 4px 0 1.5rem; }
+
+  .scorecard {
+    background: var(--surface);
+    border: 0.5px solid var(--border);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+  }
+
+  .table-wrap { width: 100%; overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; min-width: 560px; }
+
+  thead th {
+    text-align: left;
+    font-weight: 500;
+    color: var(--fg);
+    padding: 14px 16px;
+    border-bottom: 0.5px solid var(--border-strong);
+    background: var(--surface-2);
+    font-size: 13px;
+    white-space: nowrap;
+  }
+  thead th:first-child { width: 38%; }
+
+  tbody td {
+    padding: 12px 16px;
+    border-bottom: 0.5px solid var(--border);
+    color: var(--fg);
+    vertical-align: middle;
+    line-height: 1.5;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:hover { background: var(--surface-2); }
+  tbody td:first-child { font-weight: 400; color: var(--fg); }
+
+  .verdict {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+  }
+
+  .mark {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px; height: 18px;
+    border-radius: 50%;
+    font-size: 12px;
+    flex-shrink: 0;
+  }
+  .mark-good { background: var(--teal-bg); color: var(--teal-fg); }
+  .mark-bad  { background: var(--coral-bg); color: var(--coral-fg); }
+  .mark-eq   { background: var(--surface-2); color: var(--muted); border: 0.5px solid var(--border); }
+
+  .verdict-good .label { color: var(--success); }
+  .verdict-bad  .label { color: var(--danger); }
+  .verdict-eq   .label { color: var(--muted); font-style: italic; }
+
+  .label { font-weight: 400; }
+
+  .legend {
+    display: flex;
+    gap: 18px;
+    flex-wrap: wrap;
+    font-size: 12px;
+    color: var(--muted);
+    margin: 1rem 0 0;
+  }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+
+  .pull {
+    background: var(--surface);
+    border: 0.5px solid var(--border);
+    border-left: 3px solid var(--info);
+    border-radius: 0;
+    padding: 0.85rem 1rem;
+    margin: 1.5rem 0 0;
+  }
+  .pull p { margin: 0; font-size: 14px; color: var(--fg); line-height: 1.7; }
+  .pull em { font-style: italic; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Outbox vs direct pgmq.send</h1>
+  <p class="top-meta">Partner Event Gateway — summary scorecard. Atomicity is equivalent in a same-database setup; ten properties of the API contract differ.</p>
+
+  <div class="scorecard">
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th scope="col">Concern</th>
+            <th scope="col">Direct pgmq.send</th>
+            <th scope="col">Outbox</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Atomicity with events row</td>
+            <td><span class="verdict verdict-eq"><span class="mark mark-eq">=</span><span class="label">same DB, same tx</span></span></td>
+            <td><span class="verdict verdict-eq"><span class="mark mark-eq">=</span><span class="label">same DB, same tx</span></span></td>
+          </tr>
+          <tr>
+            <td>Durability</td>
+            <td><span class="verdict verdict-eq"><span class="mark mark-eq">=</span><span class="label">equivalent</span></span></td>
+            <td><span class="verdict verdict-eq"><span class="mark mark-eq">=</span><span class="label">equivalent</span></span></td>
+          </tr>
+          <tr>
+            <td>API p99 latency</td>
+            <td><span class="verdict verdict-bad"><span class="mark mark-bad">−</span><span class="label">correlated with queue load</span></span></td>
+            <td><span class="verdict verdict-good"><span class="mark mark-good">+</span><span class="label">predictable</span></span></td>
+          </tr>
+          <tr>
+            <td>Lock contention with consumers</td>
+            <td><span class="verdict verdict-bad"><span class="mark mark-bad">−</span><span class="label">on hot pgmq pages</span></span></td>
+            <td><span class="verdict verdict-good"><span class="mark mark-good">+</span><span class="label">separate table</span></span></td>
+          </tr>
+          <tr>
+            <td>Behaviour during pgmq incident</td>
+            <td><span class="verdict verdict-bad"><span class="mark mark-bad">−</span><span class="label">cascading 500s</span></span></td>
+            <td><span class="verdict verdict-good"><span class="mark mark-good">+</span><span class="label">partners unaffected</span></span></td>
+          </tr>
+          <tr>
+            <td>Coupling to queue technology</td>
+            <td><span class="verdict verdict-bad"><span class="mark mark-bad">−</span><span class="label">in the ingest path</span></span></td>
+            <td><span class="verdict verdict-good"><span class="mark mark-good">+</span><span class="label">isolated to poller</span></span></td>
+          </tr>
+          <tr>
+            <td>Backpressure / rate-limit point</td>
+            <td><span class="verdict verdict-bad"><span class="mark mark-bad">−</span><span class="label">none</span></span></td>
+            <td><span class="verdict verdict-good"><span class="mark mark-good">+</span><span class="label">poller is the seam</span></span></td>
+          </tr>
+          <tr>
+            <td>Observability of delivery</td>
+            <td><span class="verdict verdict-bad"><span class="mark mark-bad">−</span><span class="label">via pgmq only</span></span></td>
+            <td><span class="verdict verdict-good"><span class="mark mark-good">+</span><span class="label">application-managed</span></span></td>
+          </tr>
+          <tr>
+            <td>Code complexity</td>
+            <td><span class="verdict verdict-good"><span class="mark mark-good">+</span><span class="label">simpler (~5 lines)</span></span></td>
+            <td><span class="verdict verdict-bad"><span class="mark mark-bad">−</span><span class="label">more (~100 lines)</span></span></td>
+          </tr>
+          <tr>
+            <td>Latency from accept to queue</td>
+            <td><span class="verdict verdict-good"><span class="mark mark-good">+</span><span class="label">immediate</span></span></td>
+            <td><span class="verdict verdict-bad"><span class="mark mark-bad">−</span><span class="label">+1 poll interval</span></span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="legend">
+    <span><span class="mark mark-good">+</span>better</span>
+    <span><span class="mark mark-bad">−</span>worse</span>
+    <span><span class="mark mark-eq">=</span>equivalent</span>
+  </div>
+
+  <div class="pull">
+    <p>Atomicity is the same in both options. What differs is <em>what API success means</em>. Direct send promises "everything downstream is healthy right now." Outbox promises "we have it, you can stop worrying."</p>
+  </div>
+</main>
+</body>
+</html>

@@ -1,0 +1,84 @@
+spring:
+  application:
+    name: partner-event-gateway
+
+  threads:
+    virtual:
+      enabled: true
+
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:events}
+    username: ${DB_USER:postgres}
+    password: ${DB_PASS:postgres}
+    hikari:
+      maximum-pool-size: ${HIKARI_MAX:30}
+      minimum-idle: 5
+      connection-timeout: 5000
+      # PgBouncer transaction mode compatibility (no-op with direct Postgres):
+      auto-commit: true
+      data-source-properties:
+        prepareThreshold: 0
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+
+  jackson:
+    serialization:
+      write-dates-as-timestamps: false
+
+server:
+  port: 8080
+  shutdown: graceful
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, info, prometheus, metrics
+  endpoint:
+    health:
+      show-details: always
+  metrics:
+    tags:
+      application: partner-event-gateway
+      role: ${APP_RUNTIME_MODE:CONSUMER_ALL}
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+  api-docs:
+    path: /v3/api-docs
+
+app:
+  runtime:
+    # API | CONSUMER_ALL | CONSUMER_ORDER_CREATED | CONSUMER_SHIPMENT_UPDATED |
+    # CONSUMER_RETURN_REQUESTED | CONSUMER_ADDRESS_UPDATED | CONSUMER_ORDER_CANCELLED
+    mode: ${APP_RUNTIME_MODE:CONSUMER_ALL}
+
+  security:
+    timestamp-skew: 5m
+    algorithm: HmacSHA256
+    headers:
+      partner-id: X-Partner-Id
+      timestamp: X-Timestamp
+      signature: X-Signature
+      idempotency-key: Idempotency-Key
+
+  consumer:
+    poll-interval-ms: 500
+    batch-size: 10
+    visibility-timeout-seconds: 30
+    max-attempts: 5
+    concurrency:
+      events_order_created: 8
+      events_shipment_updated: 6
+      events_return_requested: 4
+      events_address_updated: 2
+      events_order_cancelled: 4
+
+logging:
+  level:
+    com.example.peg: INFO
+    org.flywaydb: INFO

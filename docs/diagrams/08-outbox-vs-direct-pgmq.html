@@ -1,0 +1,479 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Outbox vs direct pgmq.send</title>
+<style>
+  :root {
+    --bg: #FAF9F7;
+    --fg: #2C2C2A;
+    --muted: #5F5E5A;
+    --tertiary: #888780;
+    --surface: #FFFFFF;
+    --surface-2: #F1EFE8;
+    --border: rgba(60, 60, 58, 0.15);
+    --border-strong: rgba(60, 60, 58, 0.3);
+    --info: #185FA5;
+    --success: #0F6E56;
+    --danger: #A32D2D;
+    --teal-bg: #E1F5EE;
+    --teal-fg: #085041;
+    --coral-bg: #FAECE7;
+    --coral-fg: #712B13;
+    --gray-bg: #F1EFE8;
+    --gray-fg: #444441;
+    --radius-md: 8px;
+    --radius-lg: 12px;
+    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1A1A18;
+      --fg: #E5E3DB;
+      --muted: #B4B2A9;
+      --tertiary: #888780;
+      --surface: #232321;
+      --surface-2: #2C2C2A;
+      --border: rgba(229, 227, 219, 0.15);
+      --border-strong: rgba(229, 227, 219, 0.3);
+      --info: #85B7EB;
+      --success: #5DCAA5;
+      --danger: #F09595;
+      --teal-bg: #085041;
+      --teal-fg: #9FE1CB;
+      --coral-bg: #712B13;
+      --coral-fg: #F5C4B3;
+      --gray-bg: #444441;
+      --gray-fg: #D3D1C7;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--font-sans);
+    font-size: 16px;
+    line-height: 1.6;
+    padding: 2rem 1rem 4rem;
+  }
+  main { max-width: 760px; margin: 0 auto; }
+
+  h1 { font-size: 22px; font-weight: 500; margin: 0 0 8px; }
+  h3 { font-size: 16px; font-weight: 500; margin: 0 0 0.5rem; }
+  h4 { font-size: 14px; font-weight: 500; margin: 0 0 6px; color: var(--fg); }
+  p, li { font-size: 14px; line-height: 1.65; color: var(--muted); }
+  em { font-style: italic; }
+
+  .top-meta { font-size: 13px; color: var(--tertiary); margin: 4px 0 1.25rem; }
+
+  .tab-bar { display: flex; gap: 6px; flex-wrap: wrap; margin: 0 0 1rem; padding: 0; list-style: none; }
+  .tab {
+    padding: 6px 12px; border: 0.5px solid var(--border); border-radius: var(--radius-md);
+    background: transparent; color: var(--muted); cursor: pointer; font: inherit; font-size: 13px;
+  }
+  .tab[aria-selected="true"] {
+    background: var(--surface-2); color: var(--fg); border-color: var(--border-strong);
+  }
+  .panel { display: none; }
+  .panel.on { display: block; }
+
+  .cmp { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 0 0 1rem; }
+  @media (max-width: 540px) { .cmp { grid-template-columns: 1fr; } }
+
+  .card {
+    background: var(--surface); border: 0.5px solid var(--border); border-radius: var(--radius-lg);
+    padding: 0.9rem 1rem;
+  }
+  .card p { margin: 0 0 6px; }
+  .card p:last-child { margin-bottom: 0; }
+  .card ul { margin: 6px 0 0; padding-left: 18px; line-height: 1.7; }
+  .card li { font-size: 13px; margin: 2px 0; }
+
+  .tag {
+    display: inline-block; font-size: 12px; padding: 2px 8px; border-radius: var(--radius-md); margin-right: 6px;
+  }
+  .tag-teal  { background: var(--teal-bg);  color: var(--teal-fg);  }
+  .tag-coral { background: var(--coral-bg); color: var(--coral-fg); }
+  .tag-gray  { background: var(--gray-bg);  color: var(--gray-fg);  }
+
+  .mono { font-family: var(--font-mono); font-size: 12px; }
+
+  .pull {
+    background: var(--surface);
+    border: 0.5px solid var(--border);
+    border-left: 3px solid var(--info);
+    border-radius: 0;
+    padding: 0.85rem 1rem;
+    margin: 0 0 1rem;
+  }
+  .pull p { margin: 0; font-size: 14px; color: var(--fg); line-height: 1.7; }
+
+  .pill-row { display: flex; gap: 6px; flex-wrap: wrap; }
+  .pill {
+    padding: 5px 10px; border: 0.5px solid var(--border); border-radius: var(--radius-md);
+    background: transparent; color: var(--muted); cursor: pointer; font: inherit; font-size: 12px;
+  }
+  .pill[aria-pressed="true"] {
+    background: var(--surface-2); color: var(--fg); border-color: var(--border-strong);
+  }
+  .pill:focus-visible, .tab:focus-visible {
+    outline: 2px solid var(--info); outline-offset: 2px;
+  }
+
+  .divider { border: none; border-top: 0.5px solid var(--border); margin: 1.25rem 0; }
+
+  .table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .table th { text-align: left; font-weight: 500; color: var(--fg); padding: 10px 8px; border-bottom: 0.5px solid var(--border-strong); font-size: 13px; }
+  .table td { padding: 10px 8px; border-bottom: 0.5px solid var(--border); color: var(--muted); vertical-align: top; line-height: 1.5; }
+  .table tr:last-child td { border-bottom: none; }
+  .mark-good { color: var(--success); font-weight: 500; }
+  .mark-bad  { color: var(--danger);  font-weight: 500; }
+  .mark-eq   { color: var(--muted); }
+
+  .row-summary { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin: 0 0 1rem; font-size: 13px; color: var(--muted); }
+  input[type="range"] { flex: 1; min-width: 160px; accent-color: var(--info); }
+
+  .stat-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin: 0 0 1rem; }
+  .stat { background: var(--surface-2); border-radius: var(--radius-md); padding: 0.75rem 0.9rem; }
+  .stat .label { font-size: 12px; color: var(--muted); margin: 0 0 4px; }
+  .stat .value { font-size: 18px; font-weight: 500; color: var(--fg); margin: 0; line-height: 1.3; }
+  .stat .value.bad  { color: var(--danger); }
+  .stat .value.good { color: var(--success); }
+
+  strong { font-weight: 500; color: var(--fg); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Outbox vs direct pgmq.send</h1>
+  <p class="top-meta">Partner Event Gateway — supplementary diagram. Atomicity is equivalent in a same-database setup; six operational properties differ.</p>
+
+  <div class="tab-bar" role="tablist">
+    <button class="tab" role="tab" data-tab="contract" aria-selected="true">The two contracts</button>
+    <button class="tab" role="tab" data-tab="six"      aria-selected="false">Six distinctions</button>
+    <button class="tab" role="tab" data-tab="incident" aria-selected="false">Incident simulator</button>
+    <button class="tab" role="tab" data-tab="when"     aria-selected="false">When to skip</button>
+  </div>
+
+  <section class="panel on" id="panel-contract" role="tabpanel">
+    <h3>What does "200 OK" mean?</h3>
+    <div class="cmp">
+      <div class="card">
+        <h4><span class="tag tag-coral">Direct pgmq.send</span></h4>
+        <p style="color: var(--fg); font-weight: 500;">"The event is in pgmq, ready to be processed."</p>
+        <p>Atomic with events insert in same DB.</p>
+        <p>API success = events row + queue write both committed.</p>
+      </div>
+      <div class="card">
+        <h4><span class="tag tag-teal">Outbox pattern</span></h4>
+        <p style="color: var(--fg); font-weight: 500;">"The event is durably accepted and will be delivered."</p>
+        <p>Atomic with events insert in same DB.</p>
+        <p>Forwarding is asynchronous, eventually consistent.</p>
+      </div>
+    </div>
+
+    <div class="pull">
+      <p>Direct pgmq.send couples API success to queue health. The outbox decouples them. Atomicity is equivalent — what differs is what your "200 OK" promises to the partner.</p>
+    </div>
+
+    <h3>What is the same</h3>
+    <div class="card">
+      <ul>
+        <li>Atomicity with the events row (same DB, same transaction)</li>
+        <li>Durability — both writes survive a JVM crash equally</li>
+        <li>No "API said 200 but row missing" failure mode</li>
+        <li>Idempotency via <span class="mono">UNIQUE (partner_id, event_id)</span></li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="panel" id="panel-six" role="tabpanel">
+    <h3>Pick a concern</h3>
+    <div class="pill-row" id="six-pills" style="margin-bottom: 14px;">
+      <button class="pill" data-d="1" aria-pressed="true" >1. API latency</button>
+      <button class="pill" data-d="2" aria-pressed="false">2. Lock contention</button>
+      <button class="pill" data-d="3" aria-pressed="false">3. Failure isolation</button>
+      <button class="pill" data-d="4" aria-pressed="false">4. Queue coupling</button>
+      <button class="pill" data-d="5" aria-pressed="false">5. Backpressure</button>
+      <button class="pill" data-d="6" aria-pressed="false">6. Observability</button>
+    </div>
+
+    <div id="six-detail"></div>
+
+    <hr class="divider">
+
+    <h3>Summary scorecard</h3>
+    <table class="table">
+      <thead>
+        <tr><th style="width:40%;">Concern</th><th>Direct pgmq.send</th><th>Outbox</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Atomicity (same DB)</td><td><span class="mark-eq">equivalent</span></td><td><span class="mark-eq">equivalent</span></td></tr>
+        <tr><td>Durability</td><td><span class="mark-eq">equivalent</span></td><td><span class="mark-eq">equivalent</span></td></tr>
+        <tr><td>API p99 latency</td><td><span class="mark-bad">correlated with queue load</span></td><td><span class="mark-good">predictable</span></td></tr>
+        <tr><td>Lock contention with consumers</td><td><span class="mark-bad">on hot pgmq pages</span></td><td><span class="mark-good">separate table</span></td></tr>
+        <tr><td>Behaviour during pgmq incident</td><td><span class="mark-bad">cascading 500s</span></td><td><span class="mark-good">partners unaffected</span></td></tr>
+        <tr><td>Coupling to queue technology</td><td><span class="mark-bad">in the ingest path</span></td><td><span class="mark-good">isolated to poller</span></td></tr>
+        <tr><td>Backpressure / rate-limit point</td><td><span class="mark-bad">none</span></td><td><span class="mark-good">poller is the seam</span></td></tr>
+        <tr><td>Observability of delivery</td><td><span class="mark-bad">via pgmq only</span></td><td><span class="mark-good">application-managed</span></td></tr>
+        <tr><td>Code complexity</td><td><span class="mark-good">simpler (~5 lines)</span></td><td><span class="mark-bad">more (~100 lines)</span></td></tr>
+        <tr><td>Latency from accept to queue</td><td><span class="mark-good">immediate</span></td><td><span class="mark-bad">+1 poll interval</span></td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="panel" id="panel-incident" role="tabpanel">
+    <h3>If pgmq has a 60-second hiccup right now</h3>
+
+    <div class="row-summary">
+      <span>Incoming traffic</span>
+      <input type="range" id="rps" min="50" max="2000" step="50" value="500">
+      <span id="rps-out" class="mono" style="min-width: 84px; text-align: right; font-weight: 500; color: var(--fg);">500 req/s</span>
+    </div>
+
+    <div class="row-summary">
+      <span>Hiccup duration</span>
+      <input type="range" id="dur" min="5" max="300" step="5" value="60">
+      <span id="dur-out" class="mono" style="min-width: 84px; text-align: right; font-weight: 500; color: var(--fg);">60 s</span>
+    </div>
+
+    <hr class="divider">
+
+    <h4><span class="tag tag-coral">Direct pgmq.send</span></h4>
+    <div class="stat-row">
+      <div class="stat">
+        <p class="label">Partners seeing 500 errors</p>
+        <p class="value bad" id="d-partners-affected">all</p>
+      </div>
+      <div class="stat">
+        <p class="label">Failed requests</p>
+        <p class="value bad" id="d-failed">30 000</p>
+      </div>
+      <div class="stat">
+        <p class="label">Events durably accepted</p>
+        <p class="value bad" id="d-accepted">0</p>
+      </div>
+      <div class="stat">
+        <p class="label">Recovery</p>
+        <p class="value bad" id="d-recovery">manual partner retries</p>
+      </div>
+    </div>
+
+    <h4 style="margin-top: 1rem;"><span class="tag tag-teal">Outbox pattern</span></h4>
+    <div class="stat-row">
+      <div class="stat">
+        <p class="label">Partners seeing 500 errors</p>
+        <p class="value good" id="o-partners-affected">none</p>
+      </div>
+      <div class="stat">
+        <p class="label">Failed requests</p>
+        <p class="value good" id="o-failed">0</p>
+      </div>
+      <div class="stat">
+        <p class="label">Events durably accepted</p>
+        <p class="value good" id="o-accepted">30 000</p>
+      </div>
+      <div class="stat">
+        <p class="label">Recovery</p>
+        <p class="value good" id="o-recovery">poller drains automatically</p>
+      </div>
+    </div>
+
+    <p style="margin: 0.75rem 0 0; font-size: 13px; line-height: 1.6;" id="incident-note"></p>
+  </section>
+
+  <section class="panel" id="panel-when" role="tabpanel">
+    <h3>When direct pgmq.send is fine</h3>
+    <div class="card">
+      <ul>
+        <li><strong>Low traffic.</strong> Tens of events/sec, no contention, no partition issues.</li>
+        <li><strong>Tolerant clients.</strong> Partners accept 500s and retry forever.</li>
+        <li><strong>Single-stack forever.</strong> No plans to migrate to Kafka or change queue technology.</li>
+        <li><strong>Internal tools.</strong> Operations team comfortable querying pgmq directly for forensics.</li>
+      </ul>
+    </div>
+
+    <h3 style="margin-top: 1.25rem;">When the outbox earns its keep</h3>
+    <div class="card">
+      <ul>
+        <li><strong>Multi-tenant B2B with paying partners.</strong> Partner-facing reliability matters more than ~250ms forwarding latency.</li>
+        <li><strong>High concurrency.</strong> Consumers and producers contend on the same hot pgmq pages.</li>
+        <li><strong>Future-proof against queue migration.</strong> Outbox is the seam where Kafka can replace pgmq later.</li>
+        <li><strong>SLAs require independent metrics.</strong> "We accepted it" must be measurable separately from "we forwarded it".</li>
+      </ul>
+    </div>
+
+    <hr class="divider">
+
+    <h3>The framing that captures the difference</h3>
+    <div class="pull">
+      <p>Atomicity is the same in both options. What differs is <em>what API success means</em>. Direct send promises "everything downstream is healthy right now." Outbox promises "we have it, you can stop worrying." The outbox contract is what B2B partners actually want.</p>
+    </div>
+  </section>
+</main>
+
+<script>
+const D = {
+  '1': {
+    title: 'API latency profile',
+    direct: { label: 'pgmq.send is PL/pgSQL', points: [
+      'Resolves current partition, may create new one',
+      'Inserts into pgmq.q_events_* (a hot table)',
+      'Average ~1\u20132ms; tail spikes when consumers contend',
+      'Partition-roll moments cause visible tail latency'
+    ]},
+    outbox: { label: 'outbox.insert is plain INSERT', points: [
+      'Single table, no extension code',
+      'No partition lookup overhead',
+      'Average ~0.5ms with predictable tail',
+      'Independent of pgmq table activity'
+    ]},
+    summary: 'API p99 stays predictable with the outbox because partner-facing latency stops being a function of consumer load.'
+  },
+  '2': {
+    title: 'Lock contention with consumers',
+    direct: { label: 'Same hot pages', points: [
+      'Consumers SELECT \u2026 FOR UPDATE SKIP LOCKED on q_events_*',
+      'API inserts into the same hot tail of the same B-tree',
+      'Page-level latches contend at high concurrency',
+      'API latency correlates with consumer count'
+    ]},
+    outbox: { label: 'Disjoint table', points: [
+      'API writes only to event_outbox',
+      'Consumers never read from event_outbox',
+      'No shared hot pages between producers and consumers',
+      'Poller reads outbox on its own schedule'
+    ]},
+    summary: 'The hot tail of the outbox table is touched by API + poller only; the hot tail of pgmq is touched by poller + consumers only. Two smaller contention domains beat one big one.'
+  },
+  '3': {
+    title: 'Failure isolation during pgmq incidents',
+    direct: { label: 'Cascades to partners', points: [
+      'pgmq breakage \u2192 API request returns 500',
+      'Every partner sees errors until pgmq recovers',
+      'Idempotent retries fail too (same root cause)',
+      'No backlog accumulation \u2014 events are simply rejected'
+    ]},
+    outbox: { label: 'Absorbs the incident', points: [
+      'API request still succeeds (only outbox insert)',
+      'Partners get 200, never see the failure',
+      'Events accumulate in event_outbox',
+      'Poller drains naturally when pgmq recovers'
+    ]},
+    summary: 'The outbox is a circuit breaker between partner-facing reliability and queue health.'
+  },
+  '4': {
+    title: 'Coupling to queue technology',
+    direct: { label: 'Queue API in the ingest path', points: [
+      'Controller / producer service calls pgmq.send directly',
+      'Replacing the queue means changing the API code',
+      'Highest-risk code, exercised by every partner request',
+      'Migration requires API redeploy + careful rollout'
+    ]},
+    outbox: { label: 'Stable seam', points: [
+      'API writes queue-agnostic JSON to event_outbox',
+      'Only the poller knows about pgmq',
+      'Replacing the queue means changing one background worker',
+      'Lower blast radius, independent deploy cycle'
+    ]},
+    summary: 'The outbox row format becomes the stable contract between "accept" and "deliver". The queue underneath is swappable.'
+  },
+  '5': {
+    title: 'Backpressure surface',
+    direct: { label: 'No control point', points: [
+      'Each request triggers a queue write',
+      'Slow queue \u2192 slow API',
+      'Overloaded queue \u2192 overloaded API',
+      'Rate-limit policy must live upstream'
+    ]},
+    outbox: { label: 'Poller is the seam', points: [
+      'Configurable cadence and batch size',
+      'Drop-oldest, prioritize-tier, batch-by-queue policies',
+      'Forward at 1k/s even if 5k/s is arriving',
+      'API keeps accepting; backpressure shapes delivery, not ingest'
+    ]},
+    summary: 'You gain a tunable control point between accept and deliver. Throttling downstream is just a poller setting.'
+  },
+  '6': {
+    title: 'Observability of delivery',
+    direct: { label: 'Visible only via pgmq', points: [
+      'No application-level record of "sent at"',
+      'Can\u2019t answer per-message timing without log scraping',
+      '"Stuck" detection requires pgmq queries + correlation',
+      'Per-partner pipeline metrics need custom instrumentation'
+    ]},
+    outbox: { label: 'Queryable pipeline', points: [
+      'created_at on every row = API ack moment',
+      'sent_at (or row deletion) = forward moment',
+      'Stuck rows surface via simple WHERE sent_at IS NULL',
+      'Per-partner backlog: GROUP BY partner_id'
+    ]},
+    summary: 'The outbox is itself a structured, queryable view of the delivery pipeline. No log mining required.'
+  }
+};
+
+function fmt(n) { return Math.round(n).toLocaleString('en-US').replace(/,/g, ' '); }
+
+function renderD(id) {
+  const d = D[id];
+  document.getElementById('six-detail').innerHTML =
+    '<div class="cmp">' +
+      '<div class="card">' +
+        '<h4><span class="tag tag-coral">Direct pgmq.send</span> ' + d.direct.label + '</h4>' +
+        '<ul>' + d.direct.points.map(p => '<li>' + p + '</li>').join('') + '</ul>' +
+      '</div>' +
+      '<div class="card">' +
+        '<h4><span class="tag tag-teal">Outbox</span> ' + d.outbox.label + '</h4>' +
+        '<ul>' + d.outbox.points.map(p => '<li>' + p + '</li>').join('') + '</ul>' +
+      '</div>' +
+    '</div>' +
+    '<p style="margin:0;font-size:13px;line-height:1.65;"><em>' + d.summary + '</em></p>';
+}
+
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    const target = tab.dataset.tab;
+    document.querySelectorAll('.tab').forEach(t => t.setAttribute('aria-selected', t === tab ? 'true' : 'false'));
+    document.querySelectorAll('.panel').forEach(p => p.classList.toggle('on', p.id === 'panel-' + target));
+  });
+});
+
+document.querySelectorAll('#six-pills .pill').forEach(pill => {
+  pill.addEventListener('click', () => {
+    document.querySelectorAll('#six-pills .pill').forEach(p => p.setAttribute('aria-pressed', p === pill ? 'true' : 'false'));
+    renderD(pill.dataset.d);
+  });
+});
+renderD('1');
+
+function renderIncident() {
+  const rps = parseInt(document.getElementById('rps').value, 10);
+  const dur = parseInt(document.getElementById('dur').value, 10);
+  document.getElementById('rps-out').textContent = fmt(rps) + ' req/s';
+  document.getElementById('dur-out').textContent = fmt(dur) + ' s';
+
+  const total = rps * dur;
+  document.getElementById('d-failed').textContent   = fmt(total);
+  document.getElementById('d-accepted').textContent = '0';
+  document.getElementById('d-partners-affected').textContent = 'all';
+  document.getElementById('d-recovery').textContent = 'manual partner retries';
+
+  document.getElementById('o-failed').textContent   = '0';
+  document.getElementById('o-accepted').textContent = fmt(total);
+  document.getElementById('o-partners-affected').textContent = 'none';
+  document.getElementById('o-recovery').textContent = 'poller drains automatically';
+
+  document.getElementById('incident-note').textContent =
+    'During the ' + dur + ' s incident at ' + fmt(rps) + ' req/s, ' + fmt(total) +
+    ' events arrive. With direct send they are rejected; partners must retry. With the outbox, all ' + fmt(total) +
+    ' are durably accepted; the poller forwards them as soon as pgmq recovers.';
+}
+document.getElementById('rps').addEventListener('input', renderIncident);
+document.getElementById('dur').addEventListener('input', renderIncident);
+renderIncident();
+</script>
+</body>
+</html>
