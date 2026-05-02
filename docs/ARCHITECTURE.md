@@ -267,6 +267,9 @@ retention covers a full long weekend.
 - Query-side partition pruning: both controllers default the time window to
   last 90 days when not explicitly bounded, so unfiltered queries don't
   scan all 12 months of partitions.
+- For the full ladder of scaling levers (config-tunable today through to
+  Kafka migration / DB sharding), with current implementation status per
+  lever, see [`diagrams/11-scaling-levers.md`](diagrams/11-scaling-levers.md).
 
 ### Maintainability
 

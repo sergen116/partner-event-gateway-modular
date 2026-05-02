@@ -22,3 +22,4 @@ helps) so they render alongside the rest of the docs.
 - [`08-outbox-vs-direct-pgmq.md`](08-outbox-vs-direct-pgmq.md) — six operational distinctions between the outbox pattern and direct `pgmq.send`, plus an incident simulator
 - [`09-actual-scaling-bottlenecks.md`](09-actual-scaling-bottlenecks.md) — the five real bottlenecks, the cost-ordered escalation ladder, and the partitioning-myth correction
 - [`10-outbox-scorecard.md`](10-outbox-scorecard.md) — the outbox-vs-direct trade-off as a single at-a-glance scorecard table
+- [`11-scaling-levers.md`](11-scaling-levers.md) — every documented scaling lever in one ladder-ordered inventory, with what each fixes, what it doesn't, and current implementation status

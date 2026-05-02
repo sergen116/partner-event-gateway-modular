@@ -4,6 +4,8 @@
 
 > Most "scaling" problems are misdiagnosed. Hourly partitioning solves a problem people *think* they have but rarely the one they *actually* have. **Diagnose first; pick the lever the diagnosis names.**
 
+> Looking for the consolidated lever inventory — every option in one place, with current implementation status? See [`11-scaling-levers.md`](11-scaling-levers.md). This doc is the diagnostic; that one is the catalogue.
+
 ## Diagnose first
 
 Before reaching for any lever, ask which of these symptoms you actually have. Each maps to a different fix; mixing them up wastes effort.
