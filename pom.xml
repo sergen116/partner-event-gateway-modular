@@ -67,6 +67,12 @@
             <artifactId>micrometer-registry-prometheus</artifactId>
         </dependency>
 
+        <!-- In-memory cache for partner auth lookups (PartnerAuthFilter) -->
+        <dependency>
+            <groupId>com.github.ben-manes.caffeine</groupId>
+            <artifactId>caffeine</artifactId>
+        </dependency>
+
         <!-- JSON -->
         <dependency>
             <groupId>com.fasterxml.jackson.datatype</groupId>
