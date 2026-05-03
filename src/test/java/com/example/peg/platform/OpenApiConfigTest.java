@@ -12,7 +12,10 @@ class OpenApiConfigTest {
         OpenAPI api = new OpenApiConfig().partnerEventGatewayOpenApi();
         assertThat(api.getInfo().getTitle()).isEqualTo("Partner Event Gateway API");
         assertThat(api.getInfo().getVersion()).isEqualTo("v1");
-        assertThat(api.getComponents().getSecuritySchemes()).containsKey("PartnerHmac");
+        assertThat(api.getComponents().getSecuritySchemes())
+                .containsKeys("PartnerId", "Timestamp", "Signature");
         assertThat(api.getSecurity()).isNotEmpty();
+        assertThat(api.getSecurity().get(0))
+                .containsKeys("PartnerId", "Timestamp", "Signature");
     }
 }

@@ -34,12 +34,27 @@ public class OpenApiConfig {
                                 """)
                         .license(new License().name("Case Study").url("https://example.com")))
                 .components(new Components()
-                        .addSecuritySchemes("PartnerHmac",
+                        .addSecuritySchemes("PartnerId",
+                                new SecurityScheme()
+                                        .type(SecurityScheme.Type.APIKEY)
+                                        .in(SecurityScheme.In.HEADER)
+                                        .name("X-Partner-Id")
+                                        .description("Issued partner identifier."))
+                        .addSecuritySchemes("Timestamp",
+                                new SecurityScheme()
+                                        .type(SecurityScheme.Type.APIKEY)
+                                        .in(SecurityScheme.In.HEADER)
+                                        .name("X-Timestamp")
+                                        .description("RFC 3339 / ISO 8601 instant, within ±5 min."))
+                        .addSecuritySchemes("Signature",
                                 new SecurityScheme()
                                         .type(SecurityScheme.Type.APIKEY)
                                         .in(SecurityScheme.In.HEADER)
                                         .name("X-Signature")
-                                        .description("HMAC-SHA256 signature; see API description.")))
-                .addSecurityItem(new SecurityRequirement().addList("PartnerHmac"));
+                                        .description("Base64 HMAC-SHA256 signature; see API description.")))
+                .addSecurityItem(new SecurityRequirement()
+                        .addList("PartnerId")
+                        .addList("Timestamp")
+                        .addList("Signature"));
     }
 }
