@@ -31,19 +31,27 @@ sequenceDiagram
     Ctrl->>Ingest: ingest(partner_id, eventId, body)
 
     activate Tx
-    Ingest->>DB: INSERT INTO events ... ON CONFLICT DO NOTHING
-    DB-->>Ingest: rows = 1 (newly inserted)
-    Ingest->>DB: SELECT * FROM events WHERE (partner_id, event_id)
-    DB-->>Ingest: event row (status=RECEIVED)
+    Ingest->>DB: SELECT * FROM events WHERE partner_id = ? AND event_id = ?
+    DB-->>Ingest: existing row OR empty
+    Note over Ingest,DB: SELECT first because the unique index<br/>includes created_at (partition key), so a<br/>single ON CONFLICT can't dedupe by<br/>(partner_id, event_id) alone
 
-    alt newly inserted
-        Ingest->>DB: INSERT INTO event_outbox (queue_name, payload, ...)
-    else duplicate (rows = 0)
-        Note over Ingest: skip outbox insert<br/>(already enqueued previously)
+    alt existing row (duplicate)
+        Note over Ingest: skip insert and outbox<br/>(already enqueued previously)
+    else not found
+        Ingest->>DB: INSERT INTO events ... ON CONFLICT DO NOTHING RETURNING *
+        alt inserted (1 row returned)
+            DB-->>Ingest: new row (status=RECEIVED)
+            Ingest->>DB: INSERT INTO event_audit_log (null → RECEIVED)
+            Ingest->>DB: INSERT INTO event_outbox (queue_name, payload, ...)
+        else race lost (0 rows — concurrent insert won)
+            Ingest->>DB: SELECT * FROM events WHERE partner_id = ? AND event_id = ?
+            DB-->>Ingest: winner row
+            Note over Ingest: skip outbox insert
+        end
     end
     Ingest-->>Ctrl: IngestResult(row, newlyAccepted)
     deactivate Tx
-    Note over Tx,DB: commit — events + outbox written atomically
+    Note over Tx,DB: commit — events + audit + outbox written atomically
 
     Ctrl-->>Partner: 200 OK<br/>{eventId, status=RECEIVED, duplicate=false}
 
@@ -62,26 +70,26 @@ sequenceDiagram
 
 ## Idempotency — duplicate path
 
-When a partner retries the same `Idempotency-Key`, `INSERT … ON CONFLICT DO NOTHING`
-returns `rows = 0`. The outbox insert is skipped — there's already a row from the first
+When a partner retries the same `Idempotency-Key`, the initial `SELECT` by
+`(partner_id, event_id)` finds the existing row and returns it without attempting an
+`INSERT`. The outbox insert is skipped — there's already a row from the first
 submission, sent or not. The response is 200 with `duplicate=true` and the original
 event's current status (could be RECEIVED, PENDING, PROCESSING, PROCESSED, or FAILED).
 
+The `ON CONFLICT DO NOTHING` clause on the `INSERT` is the backstop for the rare race
+where two concurrent first-time submissions both pass the `SELECT`: the loser gets
+zero rows back and re-`SELECT`s to read the winner.
+
 The partner sees their retry succeed without ever knowing whether the original made it.
 That's the whole point.
-
-## Why a 200, not a 409, on duplicates
-
-A 409 forces the partner to special-case "I already sent this, that's fine" in their
-client. A 200 with `duplicate=true` makes idempotent retries the unconditional happy path.
-This matches typical webhook semantics (Stripe, GitHub, etc.).
 
 ## Crash points and recovery
 
 | When | What happens |
 |---|---|
 | HMAC fails | Filter throws 401, no DB writes |
-| API crashes after `events` insert, before `outbox` insert | Both rolled back (same transaction) |
+| API crashes after `events` insert, before `outbox` insert | All of `events` + audit + `outbox` rolled back (same transaction) |
+| Two concurrent first-time submissions race past the initial `SELECT` | Loser gets `rows = 0` from `INSERT`, re-`SELECT`s the winner, skips outbox |
 | API crashes after commit, before response | Partner retries → idempotency catches it |
 | Outbox poller crashes mid-batch | `FOR UPDATE` releases locks; another poller picks up next tick |
 | `pgmq.send` fails | Outbox row retains, `attempts` increments, retried next tick |
