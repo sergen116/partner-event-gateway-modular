@@ -28,14 +28,18 @@ Run the same `Query own events` request twice — once with the Acme environment
 with Globex. Each partner sees only their own events. Switching partners is a one-click
 environment swap.
 
+The submit requests' test scripts capture the returned `eventId` into a collection
+variable, so `Get specific event` works straight away without any manual setup.
+
 ## Idempotency demo
 
-The submission requests use `{{$guid}}` for the `Idempotency-Key` header, which generates
-a fresh UUID each run. To test idempotency, pin the key to a constant:
+Use the pre-built `Submit event — replay (fixed Idempotency-Key)` request. Its
+`Idempotency-Key` is hardcoded to `00000000-0000-0000-0000-000000000001`.
 
-1. Edit any submit request, change `{{$guid}}` to e.g. `00000000-0000-0000-0000-000000000001`.
-2. Send the request twice.
-3. First response: `"duplicate": false, "status": "RECEIVED"`.
-4. Second response: `"duplicate": true, "status": "PROCESSED"` (or whatever it reached).
+1. Send it once. Response: `"duplicate": false, "status": "RECEIVED"`.
+2. Send it again. Response: `"duplicate": true, "status": "PROCESSED"` (or whatever
+   status the original event reached by then).
 
-The events table will have exactly one row.
+The events table will have exactly one row. To repeat the demo from a clean slate,
+either bump the key to a new constant UUID or wait for the next calendar month
+(uniqueness is scoped to `(partner_id, event_id, created_at month)`).

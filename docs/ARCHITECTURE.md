@@ -297,9 +297,8 @@ concurrency (≤ 8), so `HIKARI_MAX=10` is a reasonable per-role override.
 
 Runtime observation: Hikari Micrometer metrics are exposed at
 `/actuator/prometheus` (`hikaricp_connections_pending`,
-`hikaricp_connections_timeout_total`, etc.). Sustained-pressure paging
-rules live in [`observability/prometheus-alerts.yaml`](observability/prometheus-alerts.yaml).
-A `HikariPoolHealthIndicator` flips `/actuator/health/hikariPool` to
+`hikaricp_connections_timeout_total`, etc.). A
+`HikariPoolHealthIndicator` flips `/actuator/health/hikariPool` to
 `DEGRADED` (not `DOWN` — that would fail readiness probes) whenever
 `threadsAwaitingConnection > 0`.
 

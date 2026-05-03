@@ -20,8 +20,7 @@ import javax.sql.DataSource;
  * that opt to read it.
  *
  * <p>The instantaneous {@code threadsAwaitingConnection} snapshot is what's
- * reported; sustained-pressure paging is the Prometheus alert's job (see
- * docs/observability/prometheus-alerts.yaml).
+ * reported; sustained-pressure paging is the Prometheus alert's job.
  */
 @Component
 @Slf4j

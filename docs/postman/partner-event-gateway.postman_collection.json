@@ -6,9 +6,10 @@
     "_postman_id": "11111111-2222-3333-4444-555555555555"
   },
   "variable": [
-    { "key": "baseUrl",   "value": "http://localhost:8080", "type": "string" },
-    { "key": "partnerId", "value": "partner-acme",          "type": "string" },
-    { "key": "secret",    "value": "acme-shared-secret-2024", "type": "string" }
+    { "key": "baseUrl",   "value": "http://localhost:8080",   "type": "string" },
+    { "key": "partnerId", "value": "partner-acme",            "type": "string" },
+    { "key": "secret",    "value": "acme-shared-secret-2024", "type": "string" },
+    { "key": "eventId",   "value": "",                        "type": "string" }
   ],
   "auth": {
     "type": "noauth"
@@ -20,10 +21,11 @@
         "type": "text/javascript",
         "exec": [
           "// Pre-request: compute HMAC-SHA256 signature for the partner endpoints.",
-          "// Skips internal/swagger/actuator paths.",
+          "// Only /api/v1/events* needs signing. /api/v1/internal/events does not",
+          "// contain '/api/v1/events' as a substring, so a single guard suffices",
+          "// and skips internal/swagger/actuator paths automatically.",
           "const url = pm.request.url.toString();",
           "if (url.indexOf('/api/v1/events') === -1) { return; }",
-          "if (url.indexOf('/api/v1/internal') !== -1) { return; }",
           "",
           "const partnerId = pm.collectionVariables.get('partnerId');",
           "const secret = pm.collectionVariables.get('secret');",
@@ -71,7 +73,26 @@
               "path": ["api", "v1", "events"]
             },
             "description": "Submit an OrderCreated event. The Idempotency-Key is auto-generated; replay the request with the same key to test idempotency."
-          }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200 || pm.response.code === 201) {",
+                  "  const json = pm.response.json();",
+                  "  if (json && json.eventId) {",
+                  "    pm.collectionVariables.set('eventId', json.eventId);",
+                  "  }",
+                  "}",
+                  "pm.test('successful response', function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201]);",
+                  "});"
+                ]
+              }
+            }
+          ]
         },
         {
           "name": "Submit event — ShipmentStatusUpdated",
@@ -90,7 +111,26 @@
               "host": ["{{baseUrl}}"],
               "path": ["api", "v1", "events"]
             }
-          }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200 || pm.response.code === 201) {",
+                  "  const json = pm.response.json();",
+                  "  if (json && json.eventId) {",
+                  "    pm.collectionVariables.set('eventId', json.eventId);",
+                  "  }",
+                  "}",
+                  "pm.test('successful response', function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201]);",
+                  "});"
+                ]
+              }
+            }
+          ]
         },
         {
           "name": "Submit event — ReturnRequested",
@@ -109,7 +149,26 @@
               "host": ["{{baseUrl}}"],
               "path": ["api", "v1", "events"]
             }
-          }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200 || pm.response.code === 201) {",
+                  "  const json = pm.response.json();",
+                  "  if (json && json.eventId) {",
+                  "    pm.collectionVariables.set('eventId', json.eventId);",
+                  "  }",
+                  "}",
+                  "pm.test('successful response', function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201]);",
+                  "});"
+                ]
+              }
+            }
+          ]
         },
         {
           "name": "Submit event — DeliveryAddressUpdated",
@@ -128,7 +187,26 @@
               "host": ["{{baseUrl}}"],
               "path": ["api", "v1", "events"]
             }
-          }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200 || pm.response.code === 201) {",
+                  "  const json = pm.response.json();",
+                  "  if (json && json.eventId) {",
+                  "    pm.collectionVariables.set('eventId', json.eventId);",
+                  "  }",
+                  "}",
+                  "pm.test('successful response', function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201]);",
+                  "});"
+                ]
+              }
+            }
+          ]
         },
         {
           "name": "Submit event — OrderCancelled",
@@ -147,28 +225,86 @@
               "host": ["{{baseUrl}}"],
               "path": ["api", "v1", "events"]
             }
-          }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200 || pm.response.code === 201) {",
+                  "  const json = pm.response.json();",
+                  "  if (json && json.eventId) {",
+                  "    pm.collectionVariables.set('eventId', json.eventId);",
+                  "  }",
+                  "}",
+                  "pm.test('successful response', function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201]);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Submit event — replay (fixed Idempotency-Key)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "00000000-0000-0000-0000-000000000001" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"eventType\": \"OrderCreated\",\n  \"businessRef\": \"ORD-REPLAY-001\",\n  \"payload\": {\n    \"orderId\": \"ORD-REPLAY-001\",\n    \"customerId\": \"CUST-42\",\n    \"items\": [\n      { \"sku\": \"WIDGET-1\", \"qty\": 1, \"price\": 19.99 }\n    ],\n    \"total\": 19.99\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/events",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "events"]
+            },
+            "description": "Idempotency demo. The Idempotency-Key is hardcoded, so sending the request twice in a row demonstrates the dedup behaviour: first response returns duplicate=false with status RECEIVED, second returns duplicate=true with whatever status the original event has progressed to."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200 || pm.response.code === 201) {",
+                  "  const json = pm.response.json();",
+                  "  if (json && json.eventId) {",
+                  "    pm.collectionVariables.set('eventId', json.eventId);",
+                  "  }",
+                  "}",
+                  "pm.test('successful response', function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 201]);",
+                  "});"
+                ]
+              }
+            }
+          ]
         },
         {
           "name": "Query own events",
           "request": {
             "method": "GET",
             "url": {
-              "raw": "{{baseUrl}}/api/v1/events?page=0&size=20",
+              "raw": "{{baseUrl}}/api/v1/events?page=0&size=50",
               "host": ["{{baseUrl}}"],
               "path": ["api", "v1", "events"],
               "query": [
                 { "key": "page", "value": "0" },
-                { "key": "size", "value": "20" },
+                { "key": "size", "value": "50" },
                 { "key": "eventType",         "value": "OrderCreated", "disabled": true },
                 { "key": "status",            "value": "PROCESSED",    "disabled": true },
                 { "key": "businessRef",       "value": "ORD-2024-001", "disabled": true },
-                { "key": "from",              "value": "2024-01-01T00:00:00Z", "disabled": true },
-                { "key": "to",                "value": "2024-12-31T23:59:59Z", "disabled": true },
+                { "key": "from",              "value": "2026-01-01T00:00:00Z", "disabled": true },
+                { "key": "to",                "value": "2026-12-31T23:59:59Z", "disabled": true },
                 { "key": "processingOutcome", "value": "FAILED",       "disabled": true }
               ]
             },
-            "description": "Returns the calling partner's events with optional filters. Enable query params for filter combinations."
+            "description": "Returns the calling partner's events with optional filters. Enable query params for filter combinations. Without a from/to filter, the server defaults to a 90-day lookback window for partition pruning."
           }
         },
         {
