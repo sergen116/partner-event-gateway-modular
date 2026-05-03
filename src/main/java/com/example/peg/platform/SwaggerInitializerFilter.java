@@ -1,30 +1,45 @@
 package com.example.peg.platform;
 
-import org.springframework.http.MediaType;
-import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.RestController;
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import org.springframework.core.Ordered;
+import org.springframework.core.annotation.Order;
+import org.springframework.http.HttpStatus;
+import org.springframework.stereotype.Component;
+import org.springframework.web.filter.OncePerRequestFilter;
+
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 
 /**
- * Overrides the default {@code swagger-initializer.js} served by springdoc/webjar
- * with a custom build that adds an HMAC {@code requestInterceptor}.
+ * Serves a customized {@code /swagger-ui/swagger-initializer.js} that wires
+ * an HMAC {@code requestInterceptor} into Swagger UI.
  *
- * <p>The user pastes {@code partnerId:rawSecret} into Authorize once; the interceptor
- * then signs every outgoing request, so {@code X-Timestamp} / {@code X-Signature}
- * never need to be entered manually in the UI.
- *
- * <p>{@code @RequestMapping} controllers take precedence over springdoc's resource
- * handler for the same path, so this transparently replaces the default initializer.
+ * <p>Implemented as a high-precedence servlet filter — running before Spring's
+ * {@code DispatcherServlet}, it cannot lose to springdoc's resource handler.
  */
-@RestController
-public class SwaggerInitializerController {
+@Component
+@Order(Ordered.HIGHEST_PRECEDENCE)
+public class SwaggerInitializerFilter extends OncePerRequestFilter {
 
-    @GetMapping("/swagger-ui/swagger-initializer.js")
-    public ResponseEntity<String> swaggerInitializer() {
-        return ResponseEntity.ok()
-                .contentType(MediaType.parseMediaType("application/javascript"))
-                .header("Cache-Control", "no-store")
-                .body(INITIALIZER_JS);
+    private static final String PATH = "/swagger-ui/swagger-initializer.js";
+
+    @Override
+    protected void doFilterInternal(HttpServletRequest request,
+                                    HttpServletResponse response,
+                                    FilterChain chain) throws ServletException, IOException {
+        if (!PATH.equals(request.getRequestURI()) || !"GET".equalsIgnoreCase(request.getMethod())) {
+            chain.doFilter(request, response);
+            return;
+        }
+        response.setStatus(HttpStatus.OK.value());
+        response.setContentType("application/javascript");
+        response.setCharacterEncoding(StandardCharsets.UTF_8.name());
+        response.setHeader("Cache-Control", "no-store");
+        response.getWriter().write(INITIALIZER_JS);
+        response.getWriter().flush();
     }
 
     private static final String INITIALIZER_JS = """
@@ -43,10 +58,8 @@ public class SwaggerInitializerController {
                 requestInterceptor: async (req) => {
                   try {
                     const creds = req.headers && req.headers["X-Partner-Creds"];
-                    if (req.headers) delete req.headers["X-Partner-Creds"];
-
-                    // Strip any legacy header values left over from older spec versions
                     if (req.headers) {
+                      delete req.headers["X-Partner-Creds"];
                       delete req.headers["X-Partner-Id"];
                       delete req.headers["X-Timestamp"];
                       delete req.headers["X-Signature"];
@@ -72,12 +85,10 @@ public class SwaggerInitializerController {
                       : req.body == null ? ""
                       : JSON.stringify(req.body);
 
-                    // HMAC key = SHA-256(rawSecret) raw bytes (matches HmacVerifier)
                     const keyBytes = await crypto.subtle.digest("SHA-256", enc.encode(rawSecret));
                     const key = await crypto.subtle.importKey(
                       "raw", keyBytes, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]
                     );
-
                     const canonical = partnerId + "\\n" + ts + "\\n" + method + "\\n" + path + "\\n" + body;
                     const sigBytes = new Uint8Array(
                       await crypto.subtle.sign("HMAC", key, enc.encode(canonical))
