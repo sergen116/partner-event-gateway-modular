@@ -312,7 +312,88 @@ Runtime observation: Hikari Micrometer metrics are exposed at
   `RuntimeProperties` + one Deployment manifest.
 - Adding a new audit-row consumer: query `AuditLogger.historyFor(...)`.
 
-## 6. Architecture decision records (short form)
+## 6. Observability
+
+All three pillars — **logs, metrics, traces** — ship from one Spring Boot
+process, correlated by a shared `trace_id`. Endpoints (`management.endpoints`):
+`/actuator/health`, `/actuator/prometheus`, `/actuator/metrics`,
+`/actuator/circuitbreakers`, `/actuator/retries`. In production these stay off
+the partner-facing port — `PartnerAuthFilter` only guards `/api/v1/events*`,
+so `/actuator/**` must not be routed from public LBs.
+
+### Logs — SLF4J / Logback ([`logback-spring.xml`](../src/main/resources/logback-spring.xml))
+
+Two profiles: default human-readable console pattern (local/tests), and `json`
+profile with `LogstashEncoder` for stdout JSON in prod
+(`SPRING_PROFILES_ACTIVE=json`). MDC fields populated at boundaries:
+`trace_id`/`span_id` automatically by Micrometer Tracing; `partner_id` by
+`PartnerAuthFilter`; `event_id` by `PartnerEventsController`; and
+`queue`/`msg_id`/`event_type`/`partner_id`/`event_id` re-set by `PgmqWorker`
+after payload deserialization — so async logs carry the same identifiers as
+the originating HTTP request. In prod, ship stdout via the cluster log agent
+(Promtail → Loki, Fluent-Bit → ELK, etc.); `trace_id` is the join key against
+traces.
+
+### Metrics — Micrometer / Prometheus
+
+Scraped at `/actuator/prometheus`. Common tags `application` and
+`role=${APP_RUNTIME_MODE}` are applied globally so per-role pods produce
+distinct time series. Built-in: JVM, `http_server_requests_*`,
+`hikaricp_connections_*`, Logback events, Resilience4j breaker/retry. App
+metrics (`peg.*` family):
+
+| Metric | Type | Source | Tells you |
+|---|---|---|---|
+| `peg.queue.length{queue}` | gauge | `QueueDepthExporter` (API pods only — single source of truth) | Backlog per queue, KEDA input |
+| `peg.queue.oldest_msg_age_seconds{queue}` | gauge | `QueueDepthExporter` | Stuck-batch detector |
+| `peg.consumer.processed\|failed\|dlq{queue}` | counter | `PgmqWorker` | Throughput, retry rate, paging signal |
+| `peg.consumer.duration{queue}` | timer | `PgmqWorker` | Per-message latency histogram |
+| `peg.consumer.concurrency.available{queue}` | gauge | `PgmqWorker` | Free Semaphore permits (saturation) |
+| `peg.partner_cache.size\|hit_ratio` | gauge | `PartnerCacheConfig` | Auth path cache health |
+
+Local: `curl /actuator/prometheus` is enough. Prod: add a `ServiceMonitor` per
+pod. Alert seeds: `oldest_msg_age > 60s` (workers behind), any `dlq` increment,
+breaker `OPEN`, `hikaricp_connections_pending > 0` sustained, 5xx rate > 0.
+
+### Traces — Micrometer Tracing → OpenTelemetry → OTLP/HTTP
+
+W3C propagation (`traceparent`/`tracestate`). **Always-on context, opt-in
+export:** spans are always created and `trace_id`/`span_id` always flow into
+MDC, but the OTLP exporter is only registered when
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is set — so logs stay correlatable
+locally with no collector running, and there's no `Connection refused` noise.
+Sampling: `management.tracing.sampling.probability` (env `TRACING_SAMPLING`,
+default `0.1`).
+
+The async boundary is bridged by `TraceContextCarrier`: the HTTP span's W3C
+headers are inlined into the `PartnerEventMessage` JSON, then `PgmqWorker`
+extracts them and opens a `CONSUMER`-kind span as child of the producer
+context. One trace covers `HTTP POST /events → outbox → pgmq → worker →
+DownstreamCallService`.
+
+Local visualization (optional):
+
+```bash
+docker run --rm -p 16686:16686 -p 4318:4318 jaegertracing/all-in-one:latest
+OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:4318/v1/traces \
+TRACING_SAMPLING=1.0 mvn spring-boot:run
+```
+
+Prod: point the env var at an in-cluster OpenTelemetry Collector
+(`http://otel-collector.observability:4318/v1/traces`); the collector
+fans out to Tempo/Jaeger/Honeycomb/etc.
+
+### Health and correlation
+
+`/actuator/health` aggregates Spring Boot's built-ins (DB ping, disk, Flyway),
+the Resilience4j breaker indicator, and `HikariPoolHealthIndicator` — which
+returns `DEGRADED` (not `DOWN`, see [§5 Connection budget](#connection-budget))
+when callers queue for a connection so the pod stays in service while pool
+pressure is visible. Pivots: logs by `partner_id`/`event_id` → `trace_id` →
+trace UI for end-to-end timing; queue gauges + `peg.consumer.duration` for
+worker throughput; breaker/DLQ counters for downstream issues.
+
+## 7. Architecture decision records (short form)
 
 ### ADR-001: HMAC key derivation
 
