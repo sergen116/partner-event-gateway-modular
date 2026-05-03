@@ -142,6 +142,10 @@ Standard Spring Boot — properties or environment variables override
 | `DB_USER` | `postgres` | |
 | `DB_PASS` | `postgres` | |
 | `HIKARI_MAX` | `30` | Hikari pool size per pod |
+| `REPLICA_DB_URL` | _unset_ | Optional read-replica JDBC URL. Unset → cross-partner / internal event queries fall back to the primary pool. Writes always use the primary. |
+| `REPLICA_DB_USER` | inherits `DB_USER` | Replica username when `REPLICA_DB_URL` is set |
+| `REPLICA_DB_PASS` | inherits `DB_PASS` | Replica password when `REPLICA_DB_URL` is set |
+| `REPLICA_HIKARI_MAX` | `10` | Replica pool size — sized for query API concurrency only |
 
 ## What's where
 

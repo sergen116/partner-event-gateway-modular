@@ -79,6 +79,21 @@ app:
     # CONSUMER_RETURN_REQUESTED | CONSUMER_ADDRESS_UPDATED | CONSUMER_ORDER_CANCELLED
     mode: ${APP_RUNTIME_MODE:CONSUMER_ALL}
 
+  # Optional read-replica pool. Consumed only by EventRepository.query/count
+  # (see DataSourceConfig). Leave REPLICA_DB_URL unset locally / in CI — the
+  # read JdbcTemplate then aliases to the primary pool, so single-Postgres
+  # docker-compose works unchanged. In deployed envs, point this at a
+  # streaming replica.
+  datasource:
+    replica:
+      url: ${REPLICA_DB_URL:}
+      username: ${REPLICA_DB_USER:${DB_USER:postgres}}
+      password: ${REPLICA_DB_PASS:${DB_PASS:postgres}}
+      hikari:
+        maximum-pool-size: ${REPLICA_HIKARI_MAX:10}
+        minimum-idle: 2
+        connection-timeout: 5000
+
   security:
     timestamp-skew: 5m
     algorithm: HmacSHA256

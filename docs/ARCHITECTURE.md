@@ -109,6 +109,9 @@ runtime mode changes which beans get instantiated.
 
 - `EventRepository` — reads/writes against partitioned `events` table.
   All state-transition methods write an audit row inside the same transaction.
+  Writes use the primary `JdbcTemplate`; `query()` and `count()` use a
+  separate `readJdbc` bound to the read replica when configured (see
+  [§ Read/write split](#readwrite-split)).
 - `EventQuery` — extensible filter specification (partner, type, status, date
   range, business ref, processing outcome).
 - `EventSpecifications` — composable filter compilation. Adding a new filter
@@ -263,7 +266,8 @@ retention covers a full long weekend.
 - Per-event-type queues let high-volume types (e.g. `OrderCreated`) scale
   independently of low-volume types (`OrderCancelled`).
 - The same Docker image runs in 7 runtime modes — no per-role builds.
-- Read-replica for the query path is documented as Stage 3.
+- Read-replica for the query path is wired opt-in via `REPLICA_DB_URL`;
+  unset → reads share the primary pool. See [§ Read/write split](#readwrite-split).
 - Daily partitioning + 4-day retention on pgmq queues means cleanup is
   `DROP PARTITION`, not `DELETE` — no autovacuum bloat on hot tables.
 - Monthly partitioning with 12/24-month retention on operational/audit
@@ -300,7 +304,17 @@ Runtime observation: Hikari Micrometer metrics are exposed at
 `hikaricp_connections_timeout_total`, etc.). A
 `HikariPoolHealthIndicator` flips `/actuator/health/hikariPool` to
 `DEGRADED` (not `DOWN` — that would fail readiness probes) whenever
-`threadsAwaitingConnection > 0`.
+`threadsAwaitingConnection > 0` on either pool.
+
+### Read/write split
+
+Cross-partner and internal event queries (`EventRepository.query()` and
+`count()`, hit by `InternalEventsController`) route to a read replica
+when `REPLICA_DB_URL` is set. Writes — and any read inside a write
+transaction — always go to the primary. If `REPLICA_DB_URL` is unset,
+the read template falls back to the primary pool, so local dev and CI
+work unchanged on a single Postgres. Wiring lives in
+`platform/DataSourceConfig.java`.
 
 ### Maintainability
 

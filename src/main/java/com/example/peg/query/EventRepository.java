@@ -9,6 +9,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import org.postgresql.util.PGobject;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
@@ -44,12 +45,23 @@ import java.util.UUID;
  * Every state-transition method writes an {@link AuditLogger} row inside the
  * caller's transaction. If the operational UPDATE rolls back, the audit row
  * rolls back too.
+ *
+ * <h2>Read/write split</h2>
+ * {@code jdbc} carries every write and every read that participates in a
+ * write transaction (notably the {@link #findById} idempotency probes inside
+ * {@link #insertIfAbsent}). {@code readJdbc} is bound to the read replica
+ * (or aliased to the primary when no replica is configured) and is only
+ * acceptable for the cross-partner listing path: {@link #query} and
+ * {@link #count}. Replication lag would corrupt idempotency if the writers
+ * ever moved to it.
  */
 @Repository
 @RequiredArgsConstructor
 public class EventRepository {
 
     private final JdbcTemplate jdbc;
+    @Qualifier("readJdbc")
+    private final JdbcTemplate readJdbc;
     private final ObjectMapper mapper;
     private final AuditLogger audit;
 
@@ -196,13 +208,13 @@ public class EventRepository {
         List<Object> args = new ArrayList<>(frag.args());
         args.add(q.getSize());
         args.add((long) q.getPage() * q.getSize());
-        return jdbc.query(sql, rowMapper, args.toArray());
+        return readJdbc.query(sql, rowMapper, args.toArray());
     }
 
     public long count(EventQuery q) {
         EventSpecifications.SqlFragment frag = EventSpecifications.compile(q);
         String sql = "SELECT COUNT(*) FROM events" + frag.whereClause();
-        Long n = jdbc.queryForObject(sql, Long.class, frag.args().toArray());
+        Long n = readJdbc.queryForObject(sql, Long.class, frag.args().toArray());
         return n == null ? 0 : n;
     }
 

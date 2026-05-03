@@ -37,7 +37,7 @@ Layer column refers to the bottleneck layers from
 | 8 | Per-partner rate limit (token bucket → 429) | L3, blast-radius | anything else | small code change | **not wired** — would slot into `partner.PartnerAuthFilter` |
 | 9 | Bump `HIKARI_MAX` | L3, L4 | L5 ceiling | config | **wired** — `HIKARI_MAX` env var (`application.yml:14`) |
 | 10 | KEDA postgres scaler on `pgmq.metrics().queue_length` | L1 autoscale | L2, L4 | config + manifest | **partial** — `QueueDepthExporter` publishes Micrometer gauges; KEDA scaler manifest not in repo. See [`06-stage2-topology.md`](06-stage2-topology.md) |
-| 11 | Read replica for query API path (Stage 3) | L4 (query side) | ingest path | infra change | **noted** — `InternalEventsController.java:21` Javadoc flags it; not deployed |
+| 11 | Read replica for query API path | L4 (query side) | ingest path | infra change | **wired** — opt-in via `REPLICA_DB_URL`; `query()`/`count()` route to `readJdbc` (`platform/DataSourceConfig.java`), writes always use primary, unset → fallback to primary pool |
 | 12 | PgBouncer transaction-mode pooling | L4 | L5 ceiling | infra change | **partial** — JDBC settings are already PgBouncer-compatible (`prepareThreshold: 0`, `auto-commit: true` in `application.yml:18-20`); no PgBouncer service in `docker-compose.yml`. See [`06-stage2-topology.md`](06-stage2-topology.md) |
 | 13 | Index audit + covering indexes (`EXPLAIN ANALYZE`) | L4 | L5 | real work | **per-query** — case-by-case |
 | 14 | Vacuum tuning on hot pgmq tables | L4 | anything else | Postgres config | **not configured** — defaults only |

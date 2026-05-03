@@ -34,6 +34,7 @@ import static org.mockito.Mockito.when;
 class EventRepositoryTest {
 
     private JdbcTemplate jdbc;
+    private JdbcTemplate readJdbc;
     private ObjectMapper mapper;
     private AuditLogger audit;
     private EventRepository repo;
@@ -41,9 +42,10 @@ class EventRepositoryTest {
     @BeforeEach
     void setUp() {
         jdbc = mock(JdbcTemplate.class);
+        readJdbc = mock(JdbcTemplate.class);
         mapper = new ObjectMapper();
         audit = mock(AuditLogger.class);
-        repo = new EventRepository(jdbc, mapper, audit);
+        repo = new EventRepository(jdbc, readJdbc, mapper, audit);
     }
 
     @Test
@@ -207,14 +209,14 @@ class EventRepositoryTest {
 
     @Test
     void query_buildsSqlAndPagesArgs() {
-        when(jdbc.query(anyString(), any(RowMapper.class), any(Object[].class)))
+        when(readJdbc.query(anyString(), any(RowMapper.class), any(Object[].class)))
                 .thenReturn(java.util.List.of());
 
         EventQuery q = EventQuery.builder().partnerId("p").page(2).size(20).build();
         repo.query(q);
 
         ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
-        verify(jdbc).query(sql.capture(), any(RowMapper.class), any(Object[].class));
+        verify(readJdbc).query(sql.capture(), any(RowMapper.class), any(Object[].class));
         assertThat(sql.getValue())
                 .contains("ORDER BY created_at DESC, id DESC")
                 .contains("LIMIT ? OFFSET ?")
@@ -223,13 +225,13 @@ class EventRepositoryTest {
 
     @Test
     void count_returnsZero_whenNullFromQuery() {
-        when(jdbc.queryForObject(anyString(), eq(Long.class), any(Object[].class))).thenReturn(null);
+        when(readJdbc.queryForObject(anyString(), eq(Long.class), any(Object[].class))).thenReturn(null);
         assertThat(repo.count(EventQuery.builder().build())).isZero();
     }
 
     @Test
     void count_returnsValue() {
-        when(jdbc.queryForObject(anyString(), eq(Long.class), any(Object[].class))).thenReturn(7L);
+        when(readJdbc.queryForObject(anyString(), eq(Long.class), any(Object[].class))).thenReturn(7L);
         assertThat(repo.count(EventQuery.builder().build())).isEqualTo(7L);
     }
 
