@@ -1,56 +1,17 @@
 {
   "info": {
     "name": "Partner Event Gateway",
-    "description": "Submit and query events through the Partner Event Gateway. Pre-request scripts compute the HMAC-SHA256 signature automatically. Configure the collection variables to switch partners or environments.",
+    "description": "Submit and query events through the Partner Event Gateway. Each request has a pre-request script that computes the HMAC-SHA256 signature using `partnerId` and `secret` from the active environment (e.g. PEG — Local (Acme) or PEG — Local (Globex)). Select an environment before sending.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
     "_postman_id": "11111111-2222-3333-4444-555555555555"
   },
   "variable": [
-    { "key": "baseUrl",   "value": "http://localhost:8080",   "type": "string" },
-    { "key": "partnerId", "value": "partner-acme",            "type": "string" },
-    { "key": "secret",    "value": "acme-shared-secret-2024", "type": "string" },
-    { "key": "eventId",   "value": "",                        "type": "string" }
+    { "key": "baseUrl", "value": "http://localhost:8080", "type": "string" },
+    { "key": "eventId", "value": "",                      "type": "string" }
   ],
   "auth": {
     "type": "noauth"
   },
-  "event": [
-    {
-      "listen": "prerequest",
-      "script": {
-        "type": "text/javascript",
-        "exec": [
-          "// Pre-request: compute HMAC-SHA256 signature for the partner endpoints.",
-          "// Only /api/v1/events* needs signing. /api/v1/internal/events does not",
-          "// contain '/api/v1/events' as a substring, so a single guard suffices",
-          "// and skips internal/swagger/actuator paths automatically.",
-          "const url = pm.request.url.toString();",
-          "if (url.indexOf('/api/v1/events') === -1) { return; }",
-          "",
-          "const partnerId = pm.collectionVariables.get('partnerId');",
-          "const secret = pm.collectionVariables.get('secret');",
-          "",
-          "const ts = new Date().toISOString();",
-          "const method = pm.request.method.toUpperCase();",
-          "const path = pm.request.url.getPathWithQuery ? pm.request.url.getPath() : ('/' + (pm.request.url.path || []).join('/'));",
-          "const body = pm.request.body && pm.request.body.raw ? pm.request.body.raw : '';",
-          "",
-          "// Derive HMAC key = SHA-256(secret) -> bytes",
-          "const keyHex = CryptoJS.SHA256(secret).toString(CryptoJS.enc.Hex);",
-          "const keyWordArray = CryptoJS.enc.Hex.parse(keyHex);",
-          "",
-          "// Canonical message: partnerId\\n ts\\n METHOD\\n path\\n body",
-          "const canonical = partnerId + '\\n' + ts + '\\n' + method + '\\n' + path + '\\n' + body;",
-          "",
-          "const sig = CryptoJS.HmacSHA256(canonical, keyWordArray).toString(CryptoJS.enc.Base64);",
-          "",
-          "pm.request.headers.upsert({ key: 'X-Partner-Id', value: partnerId });",
-          "pm.request.headers.upsert({ key: 'X-Timestamp',  value: ts });",
-          "pm.request.headers.upsert({ key: 'X-Signature',  value: sig });"
-        ]
-      }
-    }
-  ],
   "item": [
     {
       "name": "Partner endpoints",
@@ -75,6 +36,41 @@
             "description": "Submit an OrderCreated event. The Idempotency-Key is auto-generated; replay the request with the same key to test idempotency."
           },
           "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Pre-request: compute HMAC-SHA256 signature for the partner endpoints.",
+                  "// Only /api/v1/events* needs signing. /api/v1/internal/events does not",
+                  "// contain '/api/v1/events' as a substring, so a single guard suffices",
+                  "// and skips internal/swagger/actuator paths automatically.",
+                  "const url = pm.request.url.toString();",
+                  "if (url.indexOf('/api/v1/events') === -1) { return; }",
+                  "",
+                  "const partnerId = pm.environment.get('partnerId');",
+                  "const secret = pm.environment.get('secret');",
+                  "",
+                  "const ts = new Date().toISOString();",
+                  "const method = pm.request.method.toUpperCase();",
+                  "const path = pm.request.url.getPathWithQuery ? pm.request.url.getPath() : ('/' + (pm.request.url.path || []).join('/'));",
+                  "const body = pm.request.body && pm.request.body.raw ? pm.request.body.raw : '';",
+                  "",
+                  "// Derive HMAC key = SHA-256(secret) -> bytes",
+                  "const keyHex = CryptoJS.SHA256(secret).toString(CryptoJS.enc.Hex);",
+                  "const keyWordArray = CryptoJS.enc.Hex.parse(keyHex);",
+                  "",
+                  "// Canonical message: partnerId\\n ts\\n METHOD\\n path\\n body",
+                  "const canonical = partnerId + '\\n' + ts + '\\n' + method + '\\n' + path + '\\n' + body;",
+                  "",
+                  "const sig = CryptoJS.HmacSHA256(canonical, keyWordArray).toString(CryptoJS.enc.Base64);",
+                  "",
+                  "pm.request.headers.upsert({ key: 'X-Partner-Id', value: partnerId });",
+                  "pm.request.headers.upsert({ key: 'X-Timestamp',  value: ts });",
+                  "pm.request.headers.upsert({ key: 'X-Signature',  value: sig });"
+                ]
+              }
+            },
             {
               "listen": "test",
               "script": {
@@ -114,6 +110,41 @@
           },
           "event": [
             {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Pre-request: compute HMAC-SHA256 signature for the partner endpoints.",
+                  "// Only /api/v1/events* needs signing. /api/v1/internal/events does not",
+                  "// contain '/api/v1/events' as a substring, so a single guard suffices",
+                  "// and skips internal/swagger/actuator paths automatically.",
+                  "const url = pm.request.url.toString();",
+                  "if (url.indexOf('/api/v1/events') === -1) { return; }",
+                  "",
+                  "const partnerId = pm.environment.get('partnerId');",
+                  "const secret = pm.environment.get('secret');",
+                  "",
+                  "const ts = new Date().toISOString();",
+                  "const method = pm.request.method.toUpperCase();",
+                  "const path = pm.request.url.getPathWithQuery ? pm.request.url.getPath() : ('/' + (pm.request.url.path || []).join('/'));",
+                  "const body = pm.request.body && pm.request.body.raw ? pm.request.body.raw : '';",
+                  "",
+                  "// Derive HMAC key = SHA-256(secret) -> bytes",
+                  "const keyHex = CryptoJS.SHA256(secret).toString(CryptoJS.enc.Hex);",
+                  "const keyWordArray = CryptoJS.enc.Hex.parse(keyHex);",
+                  "",
+                  "// Canonical message: partnerId\\n ts\\n METHOD\\n path\\n body",
+                  "const canonical = partnerId + '\\n' + ts + '\\n' + method + '\\n' + path + '\\n' + body;",
+                  "",
+                  "const sig = CryptoJS.HmacSHA256(canonical, keyWordArray).toString(CryptoJS.enc.Base64);",
+                  "",
+                  "pm.request.headers.upsert({ key: 'X-Partner-Id', value: partnerId });",
+                  "pm.request.headers.upsert({ key: 'X-Timestamp',  value: ts });",
+                  "pm.request.headers.upsert({ key: 'X-Signature',  value: sig });"
+                ]
+              }
+            },
+            {
               "listen": "test",
               "script": {
                 "type": "text/javascript",
@@ -151,6 +182,41 @@
             }
           },
           "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Pre-request: compute HMAC-SHA256 signature for the partner endpoints.",
+                  "// Only /api/v1/events* needs signing. /api/v1/internal/events does not",
+                  "// contain '/api/v1/events' as a substring, so a single guard suffices",
+                  "// and skips internal/swagger/actuator paths automatically.",
+                  "const url = pm.request.url.toString();",
+                  "if (url.indexOf('/api/v1/events') === -1) { return; }",
+                  "",
+                  "const partnerId = pm.environment.get('partnerId');",
+                  "const secret = pm.environment.get('secret');",
+                  "",
+                  "const ts = new Date().toISOString();",
+                  "const method = pm.request.method.toUpperCase();",
+                  "const path = pm.request.url.getPathWithQuery ? pm.request.url.getPath() : ('/' + (pm.request.url.path || []).join('/'));",
+                  "const body = pm.request.body && pm.request.body.raw ? pm.request.body.raw : '';",
+                  "",
+                  "// Derive HMAC key = SHA-256(secret) -> bytes",
+                  "const keyHex = CryptoJS.SHA256(secret).toString(CryptoJS.enc.Hex);",
+                  "const keyWordArray = CryptoJS.enc.Hex.parse(keyHex);",
+                  "",
+                  "// Canonical message: partnerId\\n ts\\n METHOD\\n path\\n body",
+                  "const canonical = partnerId + '\\n' + ts + '\\n' + method + '\\n' + path + '\\n' + body;",
+                  "",
+                  "const sig = CryptoJS.HmacSHA256(canonical, keyWordArray).toString(CryptoJS.enc.Base64);",
+                  "",
+                  "pm.request.headers.upsert({ key: 'X-Partner-Id', value: partnerId });",
+                  "pm.request.headers.upsert({ key: 'X-Timestamp',  value: ts });",
+                  "pm.request.headers.upsert({ key: 'X-Signature',  value: sig });"
+                ]
+              }
+            },
             {
               "listen": "test",
               "script": {
@@ -190,6 +256,41 @@
           },
           "event": [
             {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Pre-request: compute HMAC-SHA256 signature for the partner endpoints.",
+                  "// Only /api/v1/events* needs signing. /api/v1/internal/events does not",
+                  "// contain '/api/v1/events' as a substring, so a single guard suffices",
+                  "// and skips internal/swagger/actuator paths automatically.",
+                  "const url = pm.request.url.toString();",
+                  "if (url.indexOf('/api/v1/events') === -1) { return; }",
+                  "",
+                  "const partnerId = pm.environment.get('partnerId');",
+                  "const secret = pm.environment.get('secret');",
+                  "",
+                  "const ts = new Date().toISOString();",
+                  "const method = pm.request.method.toUpperCase();",
+                  "const path = pm.request.url.getPathWithQuery ? pm.request.url.getPath() : ('/' + (pm.request.url.path || []).join('/'));",
+                  "const body = pm.request.body && pm.request.body.raw ? pm.request.body.raw : '';",
+                  "",
+                  "// Derive HMAC key = SHA-256(secret) -> bytes",
+                  "const keyHex = CryptoJS.SHA256(secret).toString(CryptoJS.enc.Hex);",
+                  "const keyWordArray = CryptoJS.enc.Hex.parse(keyHex);",
+                  "",
+                  "// Canonical message: partnerId\\n ts\\n METHOD\\n path\\n body",
+                  "const canonical = partnerId + '\\n' + ts + '\\n' + method + '\\n' + path + '\\n' + body;",
+                  "",
+                  "const sig = CryptoJS.HmacSHA256(canonical, keyWordArray).toString(CryptoJS.enc.Base64);",
+                  "",
+                  "pm.request.headers.upsert({ key: 'X-Partner-Id', value: partnerId });",
+                  "pm.request.headers.upsert({ key: 'X-Timestamp',  value: ts });",
+                  "pm.request.headers.upsert({ key: 'X-Signature',  value: sig });"
+                ]
+              }
+            },
+            {
               "listen": "test",
               "script": {
                 "type": "text/javascript",
@@ -227,6 +328,41 @@
             }
           },
           "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Pre-request: compute HMAC-SHA256 signature for the partner endpoints.",
+                  "// Only /api/v1/events* needs signing. /api/v1/internal/events does not",
+                  "// contain '/api/v1/events' as a substring, so a single guard suffices",
+                  "// and skips internal/swagger/actuator paths automatically.",
+                  "const url = pm.request.url.toString();",
+                  "if (url.indexOf('/api/v1/events') === -1) { return; }",
+                  "",
+                  "const partnerId = pm.environment.get('partnerId');",
+                  "const secret = pm.environment.get('secret');",
+                  "",
+                  "const ts = new Date().toISOString();",
+                  "const method = pm.request.method.toUpperCase();",
+                  "const path = pm.request.url.getPathWithQuery ? pm.request.url.getPath() : ('/' + (pm.request.url.path || []).join('/'));",
+                  "const body = pm.request.body && pm.request.body.raw ? pm.request.body.raw : '';",
+                  "",
+                  "// Derive HMAC key = SHA-256(secret) -> bytes",
+                  "const keyHex = CryptoJS.SHA256(secret).toString(CryptoJS.enc.Hex);",
+                  "const keyWordArray = CryptoJS.enc.Hex.parse(keyHex);",
+                  "",
+                  "// Canonical message: partnerId\\n ts\\n METHOD\\n path\\n body",
+                  "const canonical = partnerId + '\\n' + ts + '\\n' + method + '\\n' + path + '\\n' + body;",
+                  "",
+                  "const sig = CryptoJS.HmacSHA256(canonical, keyWordArray).toString(CryptoJS.enc.Base64);",
+                  "",
+                  "pm.request.headers.upsert({ key: 'X-Partner-Id', value: partnerId });",
+                  "pm.request.headers.upsert({ key: 'X-Timestamp',  value: ts });",
+                  "pm.request.headers.upsert({ key: 'X-Signature',  value: sig });"
+                ]
+              }
+            },
             {
               "listen": "test",
               "script": {
@@ -267,6 +403,41 @@
           },
           "event": [
             {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Pre-request: compute HMAC-SHA256 signature for the partner endpoints.",
+                  "// Only /api/v1/events* needs signing. /api/v1/internal/events does not",
+                  "// contain '/api/v1/events' as a substring, so a single guard suffices",
+                  "// and skips internal/swagger/actuator paths automatically.",
+                  "const url = pm.request.url.toString();",
+                  "if (url.indexOf('/api/v1/events') === -1) { return; }",
+                  "",
+                  "const partnerId = pm.environment.get('partnerId');",
+                  "const secret = pm.environment.get('secret');",
+                  "",
+                  "const ts = new Date().toISOString();",
+                  "const method = pm.request.method.toUpperCase();",
+                  "const path = pm.request.url.getPathWithQuery ? pm.request.url.getPath() : ('/' + (pm.request.url.path || []).join('/'));",
+                  "const body = pm.request.body && pm.request.body.raw ? pm.request.body.raw : '';",
+                  "",
+                  "// Derive HMAC key = SHA-256(secret) -> bytes",
+                  "const keyHex = CryptoJS.SHA256(secret).toString(CryptoJS.enc.Hex);",
+                  "const keyWordArray = CryptoJS.enc.Hex.parse(keyHex);",
+                  "",
+                  "// Canonical message: partnerId\\n ts\\n METHOD\\n path\\n body",
+                  "const canonical = partnerId + '\\n' + ts + '\\n' + method + '\\n' + path + '\\n' + body;",
+                  "",
+                  "const sig = CryptoJS.HmacSHA256(canonical, keyWordArray).toString(CryptoJS.enc.Base64);",
+                  "",
+                  "pm.request.headers.upsert({ key: 'X-Partner-Id', value: partnerId });",
+                  "pm.request.headers.upsert({ key: 'X-Timestamp',  value: ts });",
+                  "pm.request.headers.upsert({ key: 'X-Signature',  value: sig });"
+                ]
+              }
+            },
+            {
               "listen": "test",
               "script": {
                 "type": "text/javascript",
@@ -305,7 +476,44 @@
               ]
             },
             "description": "Returns the calling partner's events with optional filters. Enable query params for filter combinations. Without a from/to filter, the server defaults to a 90-day lookback window for partition pruning."
-          }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Pre-request: compute HMAC-SHA256 signature for the partner endpoints.",
+                  "// Only /api/v1/events* needs signing. /api/v1/internal/events does not",
+                  "// contain '/api/v1/events' as a substring, so a single guard suffices",
+                  "// and skips internal/swagger/actuator paths automatically.",
+                  "const url = pm.request.url.toString();",
+                  "if (url.indexOf('/api/v1/events') === -1) { return; }",
+                  "",
+                  "const partnerId = pm.environment.get('partnerId');",
+                  "const secret = pm.environment.get('secret');",
+                  "",
+                  "const ts = new Date().toISOString();",
+                  "const method = pm.request.method.toUpperCase();",
+                  "const path = pm.request.url.getPathWithQuery ? pm.request.url.getPath() : ('/' + (pm.request.url.path || []).join('/'));",
+                  "const body = pm.request.body && pm.request.body.raw ? pm.request.body.raw : '';",
+                  "",
+                  "// Derive HMAC key = SHA-256(secret) -> bytes",
+                  "const keyHex = CryptoJS.SHA256(secret).toString(CryptoJS.enc.Hex);",
+                  "const keyWordArray = CryptoJS.enc.Hex.parse(keyHex);",
+                  "",
+                  "// Canonical message: partnerId\\n ts\\n METHOD\\n path\\n body",
+                  "const canonical = partnerId + '\\n' + ts + '\\n' + method + '\\n' + path + '\\n' + body;",
+                  "",
+                  "const sig = CryptoJS.HmacSHA256(canonical, keyWordArray).toString(CryptoJS.enc.Base64);",
+                  "",
+                  "pm.request.headers.upsert({ key: 'X-Partner-Id', value: partnerId });",
+                  "pm.request.headers.upsert({ key: 'X-Timestamp',  value: ts });",
+                  "pm.request.headers.upsert({ key: 'X-Signature',  value: sig });"
+                ]
+              }
+            }
+          ]
         },
         {
           "name": "Get specific event",
@@ -316,8 +524,45 @@
               "host": ["{{baseUrl}}"],
               "path": ["api", "v1", "events", "{{eventId}}"]
             },
-            "description": "Retrieve a single event by ID. Set {{eventId}} as a collection or environment variable."
-          }
+            "description": "Retrieve a single event by ID. {{eventId}} is a collection variable, set automatically by the post-response test scripts on the Submit requests."
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Pre-request: compute HMAC-SHA256 signature for the partner endpoints.",
+                  "// Only /api/v1/events* needs signing. /api/v1/internal/events does not",
+                  "// contain '/api/v1/events' as a substring, so a single guard suffices",
+                  "// and skips internal/swagger/actuator paths automatically.",
+                  "const url = pm.request.url.toString();",
+                  "if (url.indexOf('/api/v1/events') === -1) { return; }",
+                  "",
+                  "const partnerId = pm.environment.get('partnerId');",
+                  "const secret = pm.environment.get('secret');",
+                  "",
+                  "const ts = new Date().toISOString();",
+                  "const method = pm.request.method.toUpperCase();",
+                  "const path = pm.request.url.getPathWithQuery ? pm.request.url.getPath() : ('/' + (pm.request.url.path || []).join('/'));",
+                  "const body = pm.request.body && pm.request.body.raw ? pm.request.body.raw : '';",
+                  "",
+                  "// Derive HMAC key = SHA-256(secret) -> bytes",
+                  "const keyHex = CryptoJS.SHA256(secret).toString(CryptoJS.enc.Hex);",
+                  "const keyWordArray = CryptoJS.enc.Hex.parse(keyHex);",
+                  "",
+                  "// Canonical message: partnerId\\n ts\\n METHOD\\n path\\n body",
+                  "const canonical = partnerId + '\\n' + ts + '\\n' + method + '\\n' + path + '\\n' + body;",
+                  "",
+                  "const sig = CryptoJS.HmacSHA256(canonical, keyWordArray).toString(CryptoJS.enc.Base64);",
+                  "",
+                  "pm.request.headers.upsert({ key: 'X-Partner-Id', value: partnerId });",
+                  "pm.request.headers.upsert({ key: 'X-Timestamp',  value: ts });",
+                  "pm.request.headers.upsert({ key: 'X-Signature',  value: sig });"
+                ]
+              }
+            }
+          ]
         }
       ]
     },
@@ -341,7 +586,44 @@
               ]
             },
             "description": "Cross-partner query. No HMAC required (per case spec — internal user auth out of scope)."
-          }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Pre-request: compute HMAC-SHA256 signature for the partner endpoints.",
+                  "// Only /api/v1/events* needs signing. /api/v1/internal/events does not",
+                  "// contain '/api/v1/events' as a substring, so a single guard suffices",
+                  "// and skips internal/swagger/actuator paths automatically.",
+                  "const url = pm.request.url.toString();",
+                  "if (url.indexOf('/api/v1/events') === -1) { return; }",
+                  "",
+                  "const partnerId = pm.environment.get('partnerId');",
+                  "const secret = pm.environment.get('secret');",
+                  "",
+                  "const ts = new Date().toISOString();",
+                  "const method = pm.request.method.toUpperCase();",
+                  "const path = pm.request.url.getPathWithQuery ? pm.request.url.getPath() : ('/' + (pm.request.url.path || []).join('/'));",
+                  "const body = pm.request.body && pm.request.body.raw ? pm.request.body.raw : '';",
+                  "",
+                  "// Derive HMAC key = SHA-256(secret) -> bytes",
+                  "const keyHex = CryptoJS.SHA256(secret).toString(CryptoJS.enc.Hex);",
+                  "const keyWordArray = CryptoJS.enc.Hex.parse(keyHex);",
+                  "",
+                  "// Canonical message: partnerId\\n ts\\n METHOD\\n path\\n body",
+                  "const canonical = partnerId + '\\n' + ts + '\\n' + method + '\\n' + path + '\\n' + body;",
+                  "",
+                  "const sig = CryptoJS.HmacSHA256(canonical, keyWordArray).toString(CryptoJS.enc.Base64);",
+                  "",
+                  "pm.request.headers.upsert({ key: 'X-Partner-Id', value: partnerId });",
+                  "pm.request.headers.upsert({ key: 'X-Timestamp',  value: ts });",
+                  "pm.request.headers.upsert({ key: 'X-Signature',  value: sig });"
+                ]
+              }
+            }
+          ]
         }
       ]
     },
@@ -353,21 +635,132 @@
           "request": {
             "method": "GET",
             "url": { "raw": "{{baseUrl}}/actuator/health", "host": ["{{baseUrl}}"], "path": ["actuator", "health"] }
-          }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Pre-request: compute HMAC-SHA256 signature for the partner endpoints.",
+                  "// Only /api/v1/events* needs signing. /api/v1/internal/events does not",
+                  "// contain '/api/v1/events' as a substring, so a single guard suffices",
+                  "// and skips internal/swagger/actuator paths automatically.",
+                  "const url = pm.request.url.toString();",
+                  "if (url.indexOf('/api/v1/events') === -1) { return; }",
+                  "",
+                  "const partnerId = pm.environment.get('partnerId');",
+                  "const secret = pm.environment.get('secret');",
+                  "",
+                  "const ts = new Date().toISOString();",
+                  "const method = pm.request.method.toUpperCase();",
+                  "const path = pm.request.url.getPathWithQuery ? pm.request.url.getPath() : ('/' + (pm.request.url.path || []).join('/'));",
+                  "const body = pm.request.body && pm.request.body.raw ? pm.request.body.raw : '';",
+                  "",
+                  "// Derive HMAC key = SHA-256(secret) -> bytes",
+                  "const keyHex = CryptoJS.SHA256(secret).toString(CryptoJS.enc.Hex);",
+                  "const keyWordArray = CryptoJS.enc.Hex.parse(keyHex);",
+                  "",
+                  "// Canonical message: partnerId\\n ts\\n METHOD\\n path\\n body",
+                  "const canonical = partnerId + '\\n' + ts + '\\n' + method + '\\n' + path + '\\n' + body;",
+                  "",
+                  "const sig = CryptoJS.HmacSHA256(canonical, keyWordArray).toString(CryptoJS.enc.Base64);",
+                  "",
+                  "pm.request.headers.upsert({ key: 'X-Partner-Id', value: partnerId });",
+                  "pm.request.headers.upsert({ key: 'X-Timestamp',  value: ts });",
+                  "pm.request.headers.upsert({ key: 'X-Signature',  value: sig });"
+                ]
+              }
+            }
+          ]
         },
         {
           "name": "Metrics (Prometheus)",
           "request": {
             "method": "GET",
             "url": { "raw": "{{baseUrl}}/actuator/prometheus", "host": ["{{baseUrl}}"], "path": ["actuator", "prometheus"] }
-          }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Pre-request: compute HMAC-SHA256 signature for the partner endpoints.",
+                  "// Only /api/v1/events* needs signing. /api/v1/internal/events does not",
+                  "// contain '/api/v1/events' as a substring, so a single guard suffices",
+                  "// and skips internal/swagger/actuator paths automatically.",
+                  "const url = pm.request.url.toString();",
+                  "if (url.indexOf('/api/v1/events') === -1) { return; }",
+                  "",
+                  "const partnerId = pm.environment.get('partnerId');",
+                  "const secret = pm.environment.get('secret');",
+                  "",
+                  "const ts = new Date().toISOString();",
+                  "const method = pm.request.method.toUpperCase();",
+                  "const path = pm.request.url.getPathWithQuery ? pm.request.url.getPath() : ('/' + (pm.request.url.path || []).join('/'));",
+                  "const body = pm.request.body && pm.request.body.raw ? pm.request.body.raw : '';",
+                  "",
+                  "// Derive HMAC key = SHA-256(secret) -> bytes",
+                  "const keyHex = CryptoJS.SHA256(secret).toString(CryptoJS.enc.Hex);",
+                  "const keyWordArray = CryptoJS.enc.Hex.parse(keyHex);",
+                  "",
+                  "// Canonical message: partnerId\\n ts\\n METHOD\\n path\\n body",
+                  "const canonical = partnerId + '\\n' + ts + '\\n' + method + '\\n' + path + '\\n' + body;",
+                  "",
+                  "const sig = CryptoJS.HmacSHA256(canonical, keyWordArray).toString(CryptoJS.enc.Base64);",
+                  "",
+                  "pm.request.headers.upsert({ key: 'X-Partner-Id', value: partnerId });",
+                  "pm.request.headers.upsert({ key: 'X-Timestamp',  value: ts });",
+                  "pm.request.headers.upsert({ key: 'X-Signature',  value: sig });"
+                ]
+              }
+            }
+          ]
         },
         {
           "name": "Swagger UI",
           "request": {
             "method": "GET",
             "url": { "raw": "{{baseUrl}}/swagger-ui/index.html", "host": ["{{baseUrl}}"], "path": ["swagger-ui/index.html"] }
-          }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Pre-request: compute HMAC-SHA256 signature for the partner endpoints.",
+                  "// Only /api/v1/events* needs signing. /api/v1/internal/events does not",
+                  "// contain '/api/v1/events' as a substring, so a single guard suffices",
+                  "// and skips internal/swagger/actuator paths automatically.",
+                  "const url = pm.request.url.toString();",
+                  "if (url.indexOf('/api/v1/events') === -1) { return; }",
+                  "",
+                  "const partnerId = pm.environment.get('partnerId');",
+                  "const secret = pm.environment.get('secret');",
+                  "",
+                  "const ts = new Date().toISOString();",
+                  "const method = pm.request.method.toUpperCase();",
+                  "const path = pm.request.url.getPathWithQuery ? pm.request.url.getPath() : ('/' + (pm.request.url.path || []).join('/'));",
+                  "const body = pm.request.body && pm.request.body.raw ? pm.request.body.raw : '';",
+                  "",
+                  "// Derive HMAC key = SHA-256(secret) -> bytes",
+                  "const keyHex = CryptoJS.SHA256(secret).toString(CryptoJS.enc.Hex);",
+                  "const keyWordArray = CryptoJS.enc.Hex.parse(keyHex);",
+                  "",
+                  "// Canonical message: partnerId\\n ts\\n METHOD\\n path\\n body",
+                  "const canonical = partnerId + '\\n' + ts + '\\n' + method + '\\n' + path + '\\n' + body;",
+                  "",
+                  "const sig = CryptoJS.HmacSHA256(canonical, keyWordArray).toString(CryptoJS.enc.Base64);",
+                  "",
+                  "pm.request.headers.upsert({ key: 'X-Partner-Id', value: partnerId });",
+                  "pm.request.headers.upsert({ key: 'X-Timestamp',  value: ts });",
+                  "pm.request.headers.upsert({ key: 'X-Signature',  value: sig });"
+                ]
+              }
+            }
+          ]
         }
       ]
     }
