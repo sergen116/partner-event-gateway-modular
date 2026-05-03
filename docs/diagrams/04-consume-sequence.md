@@ -7,7 +7,7 @@ virtual threads bounded by a per-worker semaphore.
 ```mermaid
 sequenceDiagram
     autonumber
-    participant Loop as Worker loop (VT)
+    participant PL as Poll loop (VT)
     participant W as PgmqWorker (e.g. OrderCreatedWorker)
     participant Sem as Semaphore (concurrency=8)
     participant VT as Virtual thread (one per message)
@@ -15,7 +15,7 @@ sequenceDiagram
     participant EP as EventProcessor
     participant DB as events table
 
-    Loop->>W: pollOnce()
+    PL->>W: pollOnce()
     W->>PGMQ: SELECT pgmq.read(queue, vt=30s, qty=batch-size)
     PGMQ-->>W: batch [msg_1 ... msg_N]<br/>read_ct increments per msg
 
@@ -45,13 +45,13 @@ sequenceDiagram
     end
 
     W->>W: CompletableFuture.allOf(...).orTimeout(VT-5s).join()
-    W-->>Loop: returns batch.size()
+    W-->>PL: returns batch.size()
     alt batch was full (size == batch-size)
-        Note over Loop: sleep busy-poll-interval-ms (20ms),<br/>queue likely has more
+        Note over PL: sleep busy-poll-interval-ms (20ms),<br/>queue likely has more
     else batch was partial or empty
-        Note over Loop: sleep poll-interval-ms (500ms),<br/>back off
+        Note over PL: sleep poll-interval-ms (500ms),<br/>back off
     end
-    Loop->>W: pollOnce()  (next iteration)
+    PL->>W: pollOnce()  (next iteration)
 ```
 
 **Work-conserving loop.** The worker never waits the full poll interval while
