@@ -64,7 +64,7 @@ flowchart TD
 | Layer | Real cause | Try first | Don't reach for |
 |---|---|---|---|
 | **L1** consumer throughput | per-worker concurrency × replicas below arrival rate, or slow handler | raise `Semaphore`, add replicas, profile handler | hourly partitioning (renames the contention, doesn't divide it) |
-| **L2** pickup latency | poll interval | long-polling via `pgmq.read_with_poll` | more pods (latency is per-message) |
+| **L2** pickup latency | poll interval (only on idle queues — busy interval already covers loaded queues) | long-polling via `pgmq.read_with_poll` for idle-queue pickup; tune `busy-poll-interval-ms` for hot queues | more pods (latency is per-message) |
 | **L3** producer / API | API doing too much per request, or outbox poller behind | outbox (already wired), API replicas, per-partner rate limit | any consumer-side lever |
 | **L4** database tier | underlying instance, hostile workload | PgBouncer, read replica, index audit, vacuum tuning | more consumer pods (makes L4 worse) |
 | **L5** single hot event type | one pgmq queue is one heap, one B-tree | shard the saturated queue by `hash(partner_id) % N`; eventually swap that one to Kafka | spreading load evenly across all 5 queues — only one is the problem |
@@ -77,8 +77,9 @@ Most teams never get past step 4. **Don't reach for #18 when #1 isn't tried.**
 |---|---|---|---|
 | 1 | Per-worker `Semaphore` concurrency | L1 | **wired** — `app.consumer.concurrency.<queue>` (`application.yml`) |
 | 2 | Add consumer replicas (Stage 2) | L1 | **partial** — `APP_RUNTIME_MODE` switch wired; k8s manifests not in repo |
-| 3 | `pgmq.read` batch size | L1 | **wired** — `app.consumer.batch-size` |
-| 4 | Long-polling (`pgmq.read_with_poll`) | L2 | **not wired** — `PgmqWorker.readBatch` calls plain `pgmq.read` |
+| 3 | Per-queue `pgmq.read` batch size | L1 | **wired** — `app.consumer.batch-size.<queue>` (sized to ~2× concurrency) |
+| 3a | Work-conserving poll loop (busy vs idle interval) | L1, L2 | **wired** — `app.consumer.busy-poll-interval-ms` (20 ms) on full batches, `poll-interval-ms` (500 ms) when partial/empty |
+| 4 | Long-polling (`pgmq.read_with_poll`) | L2 (idle queues) | **not wired** — `PgmqWorker.readBatch` calls plain `pgmq.read`; busy interval already covers loaded queues |
 | 5 | Faster outbox poll / bigger batch | L3 | **not exposed** — `BATCH_SIZE=50`, `POLL_INTERVAL=250ms` are constants in `OutboxPoller`; would lift to `app.outbox.*` |
 | 6 | Profile + optimize per-message handler | L1 | **per-handler** — case-by-case |
 | 7 | API replicas (HPA on CPU) | L3 | **partial** — `APP_RUNTIME_MODE=API` wired; HPA manifest not in repo |

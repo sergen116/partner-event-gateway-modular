@@ -138,12 +138,16 @@ which beans get instantiated.
 ### `platform` module
 
 - **`RuntimeProperties`** — drives the seven-mode topology switch.
-- **`ConsumerProperties`** — per-queue concurrency caps tuned by I/O profile.
+- **`ConsumerProperties`** — per-queue concurrency and batch-size caps tuned by
+  I/O profile, plus busy/idle poll intervals for the work-conserving loop.
 - **`SecurityProperties`** — header names, timestamp skew, algorithm.
-- **`SchedulingConfig`** — multi-threaded `TaskScheduler` (default would serialize
-  the 5 worker poll loops).
+- **`SchedulingConfig`** — multi-threaded `TaskScheduler` for cron-style
+  scheduled tasks (`OutboxPoller`, `QueueDepthExporter`). Workers no longer
+  use it — each runs its own self-paced loop on a virtual thread.
 - **`WorkerRegistrationConfig` + `WorkerScheduler`** — programmatic, mode-driven
-  worker creation. Stage 2 transition is a config change here, not code.
+  worker creation. Scheduler just calls `worker.start()` on each active worker;
+  the loop lives inside the worker. Stage 2 transition is a config change here,
+  not code.
 - **`DataSourceConfig`** — primary writer pool + opt-in replica pool.
 - **`QueueDepthExporter`** — `peg.queue.length{queue}` and
   `peg.queue.oldest_msg_age_seconds{queue}` gauges via Micrometer/Prometheus,
@@ -256,8 +260,10 @@ Visualised: [`diagrams/03-ingest-sequence.md`](diagrams/03-ingest-sequence.md),
   Resilience4j `@Retry` + `@CircuitBreaker` so transient downstream blips are
   absorbed in-process and sustained outages trip a breaker instead of draining
   the worker pool. See [ADR-009](#adr-009-circuit-breaker--retry-on-downstream-calls).
-- **Graceful shutdown**: TaskScheduler awaits VT + 5 s for in-flight polls; workers
-  drain virtual-thread executors in `@PreDestroy`.
+- **Graceful shutdown**: each worker flips its `running` flag in `@PreDestroy`,
+  then drains its virtual-thread executor up to `visibility-timeout` seconds —
+  the loop exits within one sleep cycle, in-flight handlers complete naturally
+  to protect the delete/archive step.
 
 ### Concurrency
 
@@ -296,6 +302,54 @@ Visualised: [`diagrams/03-ingest-sequence.md`](diagrams/03-ingest-sequence.md),
 - For the full ladder of scaling levers (config-tunable today through to Kafka
   migration / DB sharding), with current implementation status per lever, see
   [`diagrams/07-scaling-and-tradeoffs.md`](diagrams/07-scaling-and-tradeoffs.md).
+
+### Capacity and scaling to 2K TPS at peak
+
+Per-worker throughput is `concurrency / handler_latency`. With the
+work-conserving loop (full batch ⇒ sleep `busy-poll-interval-ms = 20`; partial
+or empty ⇒ sleep `poll-interval-ms = 500`) the busy interval is the only
+overhead under load.
+
+**Single `CONSUMER_ALL` pod ceiling** (24 total slots across 5 queues, 50 ms
+handlers): ~400 msg/s. **2K TPS is a multi-pod target.**
+
+Sizing — per-queue split runtime, one queue per pod, 100 ms p99 handler:
+
+| Queue | Pods | `concurrency` | `batch-size` | `HIKARI_MAX` | Effective msg/s |
+|---|---|---|---|---|---|
+| `events_order_created` | 5 | 24 | 48 | 30 | ~1100 |
+| `events_shipment_updated` | 3 | 16 | 32 | 22 | ~440 |
+| `events_return_requested` | 2 | 12 | 24 | 18 | ~220 |
+| `events_address_updated` | 2 | 8 | 16 | 14 | ~150 |
+| `events_order_cancelled` | 2 | 12 | 24 | 18 | ~220 |
+| **Total** | **14** | | | | **~2130 msg/s** |
+
+What this assumes — and what to verify before committing:
+
+- **Handler p99 ≤ 100 ms.** Resilience4j retries (3 × 200 ms × ×2 backoff) push
+  worst-case latency to ~1.5 s on transient downstream failures, which collapses
+  effective concurrency. Load-test `DownstreamCallService` against the real
+  downstream, not the stub.
+- **Postgres sustains ~12K writes/sec** (each event = 3–5 writes plus pgmq
+  delete; ingest adds outbox + `pgmq.send`). Run `pgbench -j 8 -c 32 -T 60`;
+  WAL fsync is the limiter.
+- **Outbox poller keeps up.** Currently hardcoded `BATCH_SIZE=50`,
+  `POLL_INTERVAL=250 ms` ⇒ 200 msg/s drain per API pod. Promote to
+  `app.outbox.*` (lever #5) and bump to `batch=200, interval=100ms` for ~2K
+  msg/s drain on a single API pod. Already flagged in
+  [`07-scaling-and-tradeoffs.md`](diagrams/07-scaling-and-tradeoffs.md).
+- **PgBouncer in front of Postgres.** 14 consumer + 3 API pods × Hikari each
+  ≈ 350+ client connections. PgBouncer transaction-mode multiplexes onto a
+  small backend pool (50–80) — without it, Postgres connection ceiling is hit
+  before throughput.
+- **KEDA on `pgmq.queue_length`** drives autoscaling per queue Deployment, so
+  these pod counts are *peak* values not steady-state. See
+  [`06-stage2-topology.md`](diagrams/06-stage2-topology.md#stage-2-sizing-for-2k-tps).
+
+If traffic is heavily skewed (e.g. 80% `OrderCreated`), shift pods toward the
+hot queue rather than scaling everything uniformly. If a single queue still
+saturates at 5+ pods (per-heap B-tree contention), shard it by
+`hash(partner_id) % N` — lever #18.
 
 ### Connection budget
 

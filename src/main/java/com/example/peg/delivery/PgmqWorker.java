@@ -53,6 +53,7 @@ public abstract class PgmqWorker {
     private final ExecutorService virtualExecutor;
     private final Semaphore concurrencyLimiter;
     private final int concurrency;
+    private volatile boolean running = true;
 
     protected PgmqWorker(JdbcTemplate jdbc, ObjectMapper mapper, EventProcessor processor,
                          EventRepository events,
@@ -88,6 +89,7 @@ public abstract class PgmqWorker {
     @PreDestroy
     public void shutdown() {
         log.info("shutting down worker queue={}", queueName());
+        running = false;
         virtualExecutor.shutdown();
         try {
             if (!virtualExecutor.awaitTermination(
@@ -101,11 +103,54 @@ public abstract class PgmqWorker {
         }
     }
 
-    /** Invoked at fixed delay by {@code WorkerScheduler} in the platform module. */
+    /** Starts the work-conserving poll loop on the worker's virtual executor. */
+    public void start() {
+        virtualExecutor.submit(this::runLoop);
+        log.info("started poll loop queue={} busyInterval={}ms idleInterval={}ms",
+                queueName(), props.getBusyPollIntervalMs(), props.getPollIntervalMs());
+    }
+
+    /**
+     * Work-conserving poll loop. After a full batch we sleep only the busy
+     * interval (a small floor to avoid hammering pgmq when saturated); after a
+     * partial or empty batch we sleep the full poll interval.
+     */
+    private void runLoop() {
+        while (running) {
+            long sleepMs;
+            try {
+                int processed = pollOnce();
+                int batchSize = props.batchSizeFor(queueName());
+                sleepMs = (processed >= batchSize)
+                        ? props.getBusyPollIntervalMs()
+                        : props.getPollIntervalMs();
+            } catch (Exception e) {
+                log.error("poll loop iteration failed queue={}", queueName(), e);
+                sleepMs = props.getPollIntervalMs();
+            }
+
+            if (!running) break;
+
+            try {
+                Thread.sleep(sleepMs);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+        log.info("poll loop exited queue={}", queueName());
+    }
+
+    /** Backwards-compatible single-shot poll for tests. */
     public void poll() {
+        pollOnce();
+    }
+
+    /** Reads one batch and waits for it to complete. Returns the batch size processed. */
+    public int pollOnce() {
         try {
             List<PgmqMessage> batch = readBatch();
-            if (batch.isEmpty()) return;
+            if (batch.isEmpty()) return 0;
 
             log.debug("queue={} read {} messages", queueName(), batch.size());
 
@@ -118,16 +163,19 @@ public abstract class PgmqWorker {
                         .orTimeout(props.getVisibilityTimeoutSeconds() - 5L, TimeUnit.SECONDS)
                         .join();
             } catch (CompletionException ce) {
-                if (ce.getCause() instanceof TimeoutException) {
+                Throwable cause = ce.getCause() != null ? ce.getCause() : ce;
+                if (cause instanceof TimeoutException) {
                     long inFlight = futures.stream().filter(f -> !f.isDone()).count();
                     log.error("batch processing exceeded VT for queue={}, {} tasks still running",
                             queueName(), inFlight);
                 } else {
-                    log.error("batch processing failed for queue={}", queueName(), ce);
+                    log.error("batch processing failed for queue={}", queueName(), cause);
                 }
             }
+            return batch.size();
         } catch (Exception e) {
             log.error("poll error queue={}", queueName(), e);
+            return 0;
         }
     }
 
@@ -157,7 +205,7 @@ public abstract class PgmqWorker {
                         rs.getString("message")),
                 queueName(),
                 props.getVisibilityTimeoutSeconds(),
-                props.getBatchSize());
+                props.batchSizeFor(queueName()));
     }
 
     private void handle(PgmqMessage m) {

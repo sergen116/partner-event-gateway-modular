@@ -157,9 +157,14 @@ Standard Spring Boot — properties or environment variables override
 | `TRACING_SAMPLING` | `0.1` | Span sampling probability |
 | `DOWNSTREAM_BASE_URL` | `http://localhost:9999` | Stub downstream system invoked by handlers |
 
-Per-queue worker concurrency lives under `app.consumer.concurrency` in
-`application.yml`; pgmq batch size, poll interval, visibility timeout, and
-max attempts live alongside.
+Per-queue worker concurrency and batch-size live under
+`app.consumer.concurrency.<queue>` and `app.consumer.batch-size.<queue>` in
+`application.yml`. Workers run a work-conserving loop: after a full batch they
+re-poll on `app.consumer.busy-poll-interval-ms` (20 ms default); after a
+partial or empty batch they back off to `app.consumer.poll-interval-ms`
+(500 ms default). Visibility timeout and max attempts live alongside. Capacity
+sizing for 2K TPS in
+[`docs/ARCHITECTURE.md` → Capacity and scaling](docs/ARCHITECTURE.md#capacity-and-scaling-to-2k-tps-at-peak).
 
 ## What's where
 
@@ -248,8 +253,10 @@ Dockerfile                             Multi-stage: build → layer-extract → 
   but not committed. The application code, image, and migrations are deploy-ready;
   manifests are the missing operations layer.
 - **Long-polling not wired.** `PgmqWorker` calls `pgmq.read`, not
-  `pgmq.read_with_poll`. Pickup latency is bounded by the poll interval (500 ms);
-  long-polling would drop it to tens of ms. Documented as lever #4 in
+  `pgmq.read_with_poll`. Under load the work-conserving loop's busy interval
+  (20 ms) already keeps pickup latency low; long-polling would only help on
+  near-idle queues, dropping the worst-case empty-queue pickup from 500 ms to
+  tens of ms. Documented as lever #4 in
   [`docs/diagrams/07-scaling-and-tradeoffs.md`](docs/diagrams/07-scaling-and-tradeoffs.md).
 - **Per-partner rate limiting not wired.** Would slot into `PartnerAuthFilter` as
   a Caffeine-backed token bucket. Lever #8.
@@ -267,14 +274,14 @@ Dockerfile                             Multi-stage: build → layer-extract → 
 
 ## Time spent
 
-Approximately **5 working days** end-to-end:
+Approximately **3 working days** end-to-end:
 
-- ~1 day — case study analysis, API + data-model design, build scaffolding
+- ~0.5 day — case study analysis, API + data-model design, build scaffolding
   (Maven, Docker, Postgres + pgmq + pg_partman wiring)
-- ~2 days — ingest path, outbox pattern, pgmq workers (per-event-type queues,
-  virtual-thread fan-out, partition lifecycle, idempotency)
-- ~1 day — tests (unit suites + Testcontainers integration tests for the full
-  submit-to-process flow, idempotency, tenant isolation, DLQ, audit atomicity)
+- ~1.5 days — ingest path, outbox pattern, pgmq workers (per-event-type queues,
+  virtual-thread fan-out, partition lifecycle, idempotency), plus tests (unit
+  suites + Testcontainers integration tests for the full submit-to-process flow,
+  idempotency, tenant isolation, DLQ, audit atomicity)
 - ~1 day — observability (Micrometer / Prometheus, OTel tracing across the async
   boundary, JSON logging, health indicators), runtime mode topology, ADR + diagram
   documentation

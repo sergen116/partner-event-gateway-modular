@@ -42,7 +42,11 @@ public class PgmqPostgresInitializer
                 // Tighter polling/VT for faster tests
                 "app.consumer.poll-interval-ms=100",
                 "app.consumer.visibility-timeout-seconds=10",
-                "app.consumer.batch-size=20",
+                "app.consumer.batch-size.events_order_created=20",
+                "app.consumer.batch-size.events_shipment_updated=20",
+                "app.consumer.batch-size.events_return_requested=20",
+                "app.consumer.batch-size.events_address_updated=20",
+                "app.consumer.batch-size.events_order_cancelled=20",
                 "app.consumer.max-attempts=2",
                 "app.runtime.mode=CONSUMER_ALL"
         ).applyTo(ctx.getEnvironment());

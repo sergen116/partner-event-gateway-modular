@@ -127,6 +127,57 @@ single-queue. When sharding pgmq becomes operationally heavier than the alternat
 that one queue migrates to Kafka. Both options sit at the expensive end of the
 [scaling lever inventory](07-scaling-and-tradeoffs.md#3-lever-inventory--cost-ordered).
 
+## Stage 2 sizing for 2K TPS
+
+A single `CONSUMER_ALL` pod with default settings tops out around 400 msg/s (24
+slots × ~20/s at 50 ms handlers). 2K TPS at peak is a **multi-pod target** that
+falls out of the per-event-type Deployment split, with each Deployment sized
+independently. Worked example, assuming 100 ms p99 handlers and event mix
+roughly proportional to the configured concurrency:
+
+| Deployment | Replicas | `concurrency` | `batch-size` | `HIKARI_MAX` | Effective msg/s |
+|---|---|---|---|---|---|
+| `consumer-order-created` | 5 | 24 | 48 | 30 | ~1100 |
+| `consumer-shipment-updated` | 3 | 16 | 32 | 22 | ~440 |
+| `consumer-return-requested` | 2 | 12 | 24 | 18 | ~220 |
+| `consumer-address-updated` | 2 | 8 | 16 | 14 | ~150 |
+| `consumer-order-cancelled` | 2 | 12 | 24 | 18 | ~220 |
+| **Total consumer pods** | **14** | | | | **~2130 msg/s** |
+
+Plus 3 API pods × `HIKARI_MAX=12` for ingest at the same TPS (one connection
+per request thread + outbox poller). PgBouncer multiplexes the resulting
+~350 client connections onto a 50–80 backend pool.
+
+Three configuration items the application code already supports but the
+Stage 1 default does not exercise:
+
+- **`app.consumer.batch-size.<queue>`** sized to ~2× per-pod concurrency (the
+  semaphore fills in one read with mild pipelining, no head-of-line waste).
+- **`app.consumer.busy-poll-interval-ms: 20`** — under load this is the only
+  per-cycle overhead. Drop to 5–10 ms for max throughput on very fast handlers.
+- **Per-queue runtime mode** (e.g. `APP_RUNTIME_MODE=CONSUMER_ORDER_CREATED`)
+  so each pod's Hikari budget isn't shared across all 5 queues.
+
+KEDA still drives autoscaling on `pgmq.queue_length`, so these are **peak**
+counts. Steady-state likely runs at `min` replicas. If traffic skews — e.g.
+80% of TPS lands on `OrderCreated` — KEDA naturally pushes that one Deployment
+toward its `max` while the others stay near `min`. If a single queue still
+saturates at 5+ pods (per-heap B-tree contention), shard it by
+`hash(partner_id) % N` per
+[`07-scaling-and-tradeoffs.md` § 5](07-scaling-and-tradeoffs.md#5-why-partner_id-is-the-right-shard-key-when-l5-is-reached).
+
+Three things worth verifying before committing to 2K:
+
+- **Postgres write capacity** — ~12 K writes/sec at 2K TPS (3–5 writes per
+  consumed event + ingest writes). Run `pgbench` on the target instance; WAL
+  fsync is the limiter.
+- **Real-handler p99** — Resilience4j retries push worst-case latency to ~1.5 s
+  on transient downstream failures, which collapses effective concurrency.
+  Load-test against the real downstream, not the stub.
+- **Outbox drain rate** — currently hardcoded at 200 msg/s per API pod. Promote
+  to `app.outbox.*` config (lever #5) to push individual API pods toward 2K
+  msg/s drain.
+
 ## What doesn't change between Stage 1 and Stage 2
 
 The application code, the Docker image, the database schema, the migrations, the

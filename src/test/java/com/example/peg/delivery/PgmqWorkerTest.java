@@ -15,6 +15,7 @@ import org.springframework.jdbc.core.RowMapper;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -48,7 +49,7 @@ class PgmqWorkerTest {
         events = mock(EventRepository.class);
         meters = new SimpleMeterRegistry();
         props = new ConsumerProperties();
-        props.setBatchSize(5);
+        props.setBatchSize(Map.of("events_order_created", 5));
         props.setVisibilityTimeoutSeconds(10);
         props.setMaxAttempts(3);
         worker = new TestWorker(jdbc, mapper, processor, events, meters, props);

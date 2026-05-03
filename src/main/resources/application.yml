@@ -104,8 +104,19 @@ app:
       idempotency-key: Idempotency-Key
 
   consumer:
+    # Idle interval — used when the previous batch was partial or empty.
     poll-interval-ms: 500
-    batch-size: 10
+    # Busy interval — used when the previous batch was full (queue likely has
+    # more). Small floor to avoid hammering pgmq while staying work-conserving.
+    busy-poll-interval-ms: 20
+    # Per-queue batch sized to ~2× concurrency: fully fills the semaphore in
+    # one read with mild pipelining, without holding excess messages under VT.
+    batch-size:
+      events_order_created: 16
+      events_shipment_updated: 12
+      events_return_requested: 8
+      events_address_updated: 4
+      events_order_cancelled: 8
     visibility-timeout-seconds: 30
     max-attempts: 5
     concurrency:

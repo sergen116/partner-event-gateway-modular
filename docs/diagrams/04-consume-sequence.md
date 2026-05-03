@@ -1,12 +1,13 @@
 # Sequence: Event consumption
 
-What happens after the outbox poller has put a message into pgmq. Each batch is fanned
-out across virtual threads bounded by a per-worker semaphore.
+What happens after the outbox poller has put a message into pgmq. Each worker
+runs a self-paced loop on a virtual thread; each batch is fanned out across
+virtual threads bounded by a per-worker semaphore.
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant Sched as TaskScheduler
+    participant Loop as Worker loop (VT)
     participant W as PgmqWorker (e.g. OrderCreatedWorker)
     participant Sem as Semaphore (concurrency=8)
     participant VT as Virtual thread (one per message)
@@ -14,9 +15,9 @@ sequenceDiagram
     participant EP as EventProcessor
     participant DB as events table
 
-    Sched->>W: poll() (every 500ms)
-    W->>PGMQ: SELECT pgmq.read(queue, vt=30s, qty=10)
-    PGMQ-->>W: batch [msg_1 ... msg_10]<br/>read_ct increments per msg
+    Loop->>W: pollOnce()
+    W->>PGMQ: SELECT pgmq.read(queue, vt=30s, qty=batch-size)
+    PGMQ-->>W: batch [msg_1 ... msg_N]<br/>read_ct increments per msg
 
     par fan out (up to 8 concurrent)
         W->>VT: submit msg_1
@@ -40,12 +41,22 @@ sequenceDiagram
         W->>VT: submit msg_2
         Note over VT: same flow as msg_1
     and
-        W->>VT: ... up to 10 messages,<br/>at most 8 holding semaphore at once
+        W->>VT: ... up to N messages,<br/>at most 8 holding semaphore at once
     end
 
     W->>W: CompletableFuture.allOf(...).orTimeout(VT-5s).join()
-    Note over W: waits for whole batch before next poll<br/>preserves "one batch in flight" invariant
+    W-->>Loop: returns batch.size()
+    alt batch was full (size == batch-size)
+        Note over Loop: sleep busy-poll-interval-ms (20ms),<br/>queue likely has more
+    else batch was partial or empty
+        Note over Loop: sleep poll-interval-ms (500ms),<br/>back off
+    end
+    Loop->>W: pollOnce()  (next iteration)
 ```
+
+**Work-conserving loop.** The worker never waits the full poll interval while
+the queue is hot — only after a partial/empty batch does it back off. Under
+load, effective cycle = `batch_processing_time + 20 ms`, not 500 ms.
 
 ## What happens if the handler throws
 

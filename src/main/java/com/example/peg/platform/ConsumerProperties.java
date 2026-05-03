@@ -16,12 +16,17 @@ import java.util.Map;
 public class ConsumerProperties {
 
     private int pollIntervalMs = 500;
-    private int batchSize = 10;
+    private int busyPollIntervalMs = 20;
+    private Map<String, Integer> batchSize = new HashMap<>();
     private int visibilityTimeoutSeconds = 30;
     private int maxAttempts = 5;
     private Map<String, Integer> concurrency = new HashMap<>();
 
     public int concurrencyFor(String queueName) {
         return concurrency.getOrDefault(queueName, 4);
+    }
+
+    public int batchSizeFor(String queueName) {
+        return batchSize.getOrDefault(queueName, 10);
     }
 }
