@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Logging config:
+  - Default profile: human-readable console pattern with trace/correlation MDC fields.
+  - 'json' profile (SPRING_PROFILES_ACTIVE=json): Logstash JSON encoder writing to
+    stdout with MDC fields promoted to top-level keys for ingestion pipelines.
+
+  trace_id / span_id are populated by Micrometer Tracing automatically.
+  partner_id / event_id / event_type / queue / msg_id are populated by the app
+  at HTTP and worker boundaries.
+-->
+<configuration>
+
+    <springProperty scope="context" name="appName"
+                    source="spring.application.name"
+                    defaultValue="partner-event-gateway"/>
+
+    <springProfile name="!json">
+        <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+            <encoder>
+                <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] [%X{trace_id:-}/%X{span_id:-}] [%X{partner_id:-}/%X{event_id:-}] %-5level %logger{36} - %msg%n</pattern>
+            </encoder>
+        </appender>
+
+        <root level="INFO">
+            <appender-ref ref="CONSOLE"/>
+        </root>
+    </springProfile>
+
+    <springProfile name="json">
+        <appender name="JSON" class="ch.qos.logback.core.ConsoleAppender">
+            <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+                <includeMdcKeyName>trace_id</includeMdcKeyName>
+                <includeMdcKeyName>span_id</includeMdcKeyName>
+                <includeMdcKeyName>partner_id</includeMdcKeyName>
+                <includeMdcKeyName>event_id</includeMdcKeyName>
+                <includeMdcKeyName>event_type</includeMdcKeyName>
+                <includeMdcKeyName>queue</includeMdcKeyName>
+                <includeMdcKeyName>msg_id</includeMdcKeyName>
+                <customFields>{"service.name":"${appName}"}</customFields>
+            </encoder>
+        </appender>
+
+        <root level="INFO">
+            <appender-ref ref="JSON"/>
+        </root>
+    </springProfile>
+
+</configuration>

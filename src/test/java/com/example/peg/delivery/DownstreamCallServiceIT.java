@@ -126,7 +126,9 @@ class DownstreamCallServiceIT {
                 EventType.ORDER_CREATED,
                 "ORD-RESILIENCE",
                 mapper.createObjectNode(),
-                Instant.now()
+                Instant.now(),
+                null,
+                null
         );
     }
 }

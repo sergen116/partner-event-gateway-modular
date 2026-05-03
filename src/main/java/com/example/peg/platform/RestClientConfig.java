@@ -11,17 +11,22 @@ import org.springframework.web.client.RestClient;
  * blocking call doesn't pin a platform thread, and annotation-based
  * Resilience4j (@CircuitBreaker / @Retry) composes naturally without
  * needing a TimeLimiter.
+ *
+ * <p>The injected {@link RestClient.Builder} is the auto-configured one,
+ * which carries Spring's observation interceptor — outbound calls receive
+ * {@code traceparent} headers automatically when a span is active.
  */
 @Configuration
 public class RestClientConfig {
 
     @Bean
-    public RestClient downstreamRestClient(DownstreamProperties props) {
+    public RestClient downstreamRestClient(DownstreamProperties props,
+                                           RestClient.Builder builder) {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout((int) props.getConnectTimeout().toMillis());
         factory.setReadTimeout((int) props.getReadTimeout().toMillis());
 
-        return RestClient.builder()
+        return builder
                 .baseUrl(props.getBaseUrl())
                 .requestFactory(factory)
                 .build();

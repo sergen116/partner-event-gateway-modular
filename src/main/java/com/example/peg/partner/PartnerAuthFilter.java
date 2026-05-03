@@ -9,6 +9,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.slf4j.MDC;
 import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
@@ -40,6 +41,7 @@ import java.util.Optional;
 public class PartnerAuthFilter extends OncePerRequestFilter {
 
     public static final String ATTR_PARTNER_ID = "peg.partner_id";
+    private static final String MDC_PARTNER_ID = "partner_id";
 
     private final PartnerRepository partners;
     private final HmacVerifier verifier;
@@ -95,6 +97,11 @@ public class PartnerAuthFilter extends OncePerRequestFilter {
         }
 
         wrapped.setAttribute(ATTR_PARTNER_ID, partner.partnerId());
-        chain.doFilter(wrapped, response);
+        MDC.put(MDC_PARTNER_ID, partner.partnerId());
+        try {
+            chain.doFilter(wrapped, response);
+        } finally {
+            MDC.remove(MDC_PARTNER_ID);
+        }
     }
 }

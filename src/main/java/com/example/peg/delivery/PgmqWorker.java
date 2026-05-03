@@ -1,6 +1,7 @@
 package com.example.peg.delivery;
 
 import com.example.peg.platform.ConsumerProperties;
+import com.example.peg.platform.TraceContextCarrier;
 import com.example.peg.shared.PartnerEventMessage;
 import com.example.peg.query.EventRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -9,6 +10,7 @@ import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
+import org.slf4j.MDC;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.util.List;
@@ -162,12 +164,24 @@ public abstract class PgmqWorker {
         Timer.Sample sample = Timer.start(meterRegistry);
         PartnerEventMessage event = null;
         String actor = "worker:" + queueShortName();
+        // Always-set MDC fields so logs from the read-batch boundary carry
+        // the queue context even before deserialization succeeds.
+        MDC.put("queue", queueName());
+        MDC.put("msg_id", String.valueOf(m.msgId()));
         try {
             event = mapper.readValue(m.payload(), PartnerEventMessage.class);
-            processor.process(event, actor);
-            jdbc.queryForObject("SELECT pgmq.delete(?, ?)",
-                    Boolean.class, queueName(), m.msgId());
-            meterRegistry.counter("peg.consumer.processed", "queue", queueName()).increment();
+            MDC.put("partner_id", event.partnerId());
+            MDC.put("event_id", event.eventId().toString());
+            MDC.put("event_type", event.eventType().name());
+
+            try (TraceContextCarrier.SpanScope ignored = TraceContextCarrier.startConsumerSpan(
+                    "pgmq.consume " + queueName(),
+                    event.traceparent(), event.tracestate())) {
+                processor.process(event, actor);
+                jdbc.queryForObject("SELECT pgmq.delete(?, ?)",
+                        Boolean.class, queueName(), m.msgId());
+                meterRegistry.counter("peg.consumer.processed", "queue", queueName()).increment();
+            }
         } catch (Exception ex) {
             log.error("processing failed queue={} msg_id={} attempt={}",
                     queueName(), m.msgId(), m.readCt(), ex);
@@ -192,6 +206,11 @@ public abstract class PgmqWorker {
             }
         } finally {
             sample.stop(meterRegistry.timer("peg.consumer.duration", "queue", queueName()));
+            MDC.remove("queue");
+            MDC.remove("msg_id");
+            MDC.remove("partner_id");
+            MDC.remove("event_id");
+            MDC.remove("event_type");
         }
     }
 

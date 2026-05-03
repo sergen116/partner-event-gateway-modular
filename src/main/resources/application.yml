@@ -10,10 +10,16 @@ spring:
     url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:events}
     username: ${DB_USER:postgres}
     password: ${DB_PASS:postgres}
+    # Connection budget (CONSUMER_ALL, worst-case in-flight):
+    #   24 worker permits (8+6+4+2+4) + ~10 API + 1 outbox + 1 metrics
+    #   ≈ 36 → 40 default leaves ~4 headroom. Override per-pod via HIKARI_MAX.
+    #   Split-role pods (API, CONSUMER_<TYPE>) sit far below this — see
+    #   docs/ARCHITECTURE.md "Connection budget".
     hikari:
-      maximum-pool-size: ${HIKARI_MAX:30}
+      maximum-pool-size: ${HIKARI_MAX:40}
       minimum-idle: 5
       connection-timeout: 5000
+      leak-detection-threshold: 30000
       # PgBouncer transaction mode compatibility (no-op with direct Postgres):
       auto-commit: true
       data-source-properties:
@@ -47,6 +53,21 @@ management:
     tags:
       application: partner-event-gateway
       role: ${APP_RUNTIME_MODE:CONSUMER_ALL}
+  # Tracing: spans are always created and trace_id / span_id always flow
+  # into MDC, regardless of whether they're exported. The OTLP exporter is
+  # only registered when an endpoint is set — leave it unset locally to
+  # avoid connect-refused noise; in deployed envs set
+  #   OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://<collector>:4318/v1/traces
+  # to enable W3C span export.
+  tracing:
+    sampling:
+      probability: ${TRACING_SAMPLING:0.1}
+    propagation:
+      type: w3c
+  otlp:
+    tracing:
+      endpoint: ${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:#{null}}
+      transport: http
 
 springdoc:
   swagger-ui:

@@ -271,6 +271,33 @@ retention covers a full long weekend.
   Kafka migration / DB sharding), with current implementation status per
   lever, see [`diagrams/11-scaling-levers.md`](diagrams/11-scaling-levers.md).
 
+### Connection budget
+
+The Hikari pool default is 40 (override per-pod via `HIKARI_MAX`). The
+worst-case in-flight demand sits in `CONSUMER_ALL` mode, which is the
+configured default for local/single-pod deploys:
+
+| Holder                              | Worst-case connections |
+|-------------------------------------|------------------------|
+| Worker semaphores (8+6+4+2+4)       | 24                     |
+| API request handlers (typical peak) | 5–10                   |
+| OutboxPoller drain transaction      | 1                      |
+| QueueDepthExporter scrape           | 1                      |
+| **Total**                           | **31–35**              |
+
+40 leaves ~5 connections of headroom for transient slow-downstream events
+that pin a transaction. Split-role pods (`API`, `CONSUMER_<TYPE>`) sit far
+below this — a single per-type consumer pod tops out at its worker
+concurrency (≤ 8), so `HIKARI_MAX=10` is a reasonable per-role override.
+
+Runtime observation: Hikari Micrometer metrics are exposed at
+`/actuator/prometheus` (`hikaricp_connections_pending`,
+`hikaricp_connections_timeout_total`, etc.). Sustained-pressure paging
+rules live in [`observability/prometheus-alerts.yaml`](observability/prometheus-alerts.yaml).
+A `HikariPoolHealthIndicator` flips `/actuator/health/hikariPool` to
+`DEGRADED` (not `DOWN` — that would fail readiness probes) whenever
+`threadsAwaitingConnection > 0`.
+
 ### Maintainability
 
 - Adding a new event type: enum value + queue migration + worker subclass

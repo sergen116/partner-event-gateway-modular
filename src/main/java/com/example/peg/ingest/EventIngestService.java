@@ -1,5 +1,6 @@
 package com.example.peg.ingest;
 
+import com.example.peg.platform.TraceContextCarrier;
 import com.example.peg.shared.EventRecord;
 import com.example.peg.shared.PartnerEventMessage;
 import com.example.peg.delivery.OutboxRepository;
@@ -42,10 +43,14 @@ public class EventIngestService {
         EventRecord row = insertResult.row();
 
         if (insertResult.wasInserted()) {
+            // Snapshot the active HTTP span so the downstream worker can
+            // resume the trace as a CONSUMER span linked back to ingest.
+            TraceContextCarrier.Captured trace = TraceContextCarrier.capture();
             PartnerEventMessage message = new PartnerEventMessage(
                     eventId, partnerId, req.eventType(),
                     req.businessRef(), req.payload(),
-                    row.createdAt());
+                    row.createdAt(),
+                    trace.traceparent(), trace.tracestate());
             outbox.insert(partnerId, eventId, req.eventType().queueName(), writeJson(message));
         }
 

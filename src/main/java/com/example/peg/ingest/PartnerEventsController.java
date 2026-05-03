@@ -15,6 +15,7 @@ import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.slf4j.MDC;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -58,13 +59,15 @@ public class PartnerEventsController {
         }
 
         UUID eventId = parseEventId(idempotencyKey);
-        var result = ingest.ingest(partnerId, eventId, body);
+        try (MDC.MDCCloseable ignored = MDC.putCloseable("event_id", eventId.toString())) {
+            var result = ingest.ingest(partnerId, eventId, body);
 
-        return new SubmitEventResponse(
-                result.row().eventId(),
-                result.row().status(),
-                !result.newlyAccepted(),
-                result.receivedAt());
+            return new SubmitEventResponse(
+                    result.row().eventId(),
+                    result.row().status(),
+                    !result.newlyAccepted(),
+                    result.receivedAt());
+        }
     }
 
     @GetMapping("/{eventId}")
