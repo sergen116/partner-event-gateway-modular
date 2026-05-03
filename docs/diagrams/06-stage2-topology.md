@@ -127,6 +127,54 @@ single-queue. When sharding pgmq becomes operationally heavier than the alternat
 that one queue migrates to Kafka. Both options sit at the expensive end of the
 [scaling lever inventory](07-scaling-and-tradeoffs.md#3-lever-inventory--cost-ordered).
 
+## Stage 1 sizing for 2K TPS (peak only)
+
+Stage 1 is the single-pod `CONSUMER_ALL` shape: one JVM hosts the API, all 5
+consumer workers, and the outbox poller against one Postgres instance. The
+default tuning (24 worker slots, `HIKARI_MAX=40`) tops out at ~400 msg/s —
+adequate for steady state, far below 2K. With aggressive tuning a single pod
+can absorb a **short** 2K-TPS peak, but every dimension of headroom collapses
+into one process.
+
+Tuning required (peak only):
+
+| Setting | Default | Peak-2K value | Why |
+|---|---|---|---|
+| `app.consumer.concurrency.events_order_created` | 8 | 40 | Hot queue takes ~50% of slots |
+| `app.consumer.concurrency.events_shipment_updated` | 6 | 24 | |
+| `app.consumer.concurrency.events_return_requested` | 4 | 16 | |
+| `app.consumer.concurrency.events_address_updated` | 2 | 8 | |
+| `app.consumer.concurrency.events_order_cancelled` | 4 | 16 | |
+| **Total worker slots** | 24 | **104** | |
+| `app.consumer.batch-size.<queue>` | per-queue | 2× concurrency each | Fill semaphore in one read |
+| `app.consumer.busy-poll-interval-ms` | 20 | 5 | Recover residual ceiling gap |
+| `HIKARI_MAX` | 40 | 120 | 104 workers + ~10 API + 1 outbox + headroom |
+| `app.outbox.batch-size` *(after lever #5)* | 50 const | 200 | Single outbox poller is the inbound bottleneck |
+| `app.outbox.poll-interval-ms` *(after lever #5)* | 250 const | 100 | 200 msg / 100 ms = 2K msg/s drain |
+
+Throughput math: **104 slots × (1 / handler_latency)** is the consume-side
+ceiling. Holds at 2K only if downstream handler p99 ≤ 50 ms. At 100 ms p99 the
+ceiling is ~1040 msg/s — Stage 1 can't sustain 2K with realistic latencies.
+
+Why this isn't the recommended shape for sustained 2K TPS:
+
+- **Single JVM, single failure domain.** GC pause, OOM, deploy restart, or a
+  single bad downstream pin everything at once. No HA.
+- **No surgical scaling.** A burst on `OrderCreated` consumes slots that the
+  other 4 queues can't cede; per-queue concurrency caps are static within one
+  pod.
+- **Connection management overhead at 120+ connections.** Without PgBouncer,
+  Postgres holds 120 backends per pod; context switches and per-backend memory
+  start to matter.
+- **One outbox poller.** The whole inbound side bottlenecks on one loop draining
+  the outbox table. In Stage 2, every API pod runs its own poller.
+
+So Stage 1 at 2K is **a deliberate peak-absorption configuration** —
+pre-provisioned for short bursts, monitored on Hikari pending-acquire and
+queue depth, with a runbook to flip `APP_RUNTIME_MODE` to per-queue Stage 2
+if the peak holds for more than a few minutes. For sustained 2K, see Stage 2
+below.
+
 ## Stage 2 sizing for 2K TPS
 
 A single `CONSUMER_ALL` pod with default settings tops out around 400 msg/s (24
