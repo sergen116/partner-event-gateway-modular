@@ -230,6 +230,11 @@ retention covers a full long weekend.
   transaction rollback; pgmq redelivers after VT.
 - DLQ: messages exceeding `maxAttempts` move to the pgmq archive table and
   the events row is marked FAILED.
+- Downstream resilience: `DownstreamCallService.notify` is wrapped with
+  Resilience4j `@Retry` + `@CircuitBreaker` so transient downstream blips
+  are absorbed in-process and sustained outages trip a breaker instead of
+  draining the worker pool. Rationale and budgets in
+  [ADR-009](#adr-009-circuit-breaker--retry-on-downstream-calls).
 - Graceful shutdown: TaskScheduler awaits VT+5s for in-flight polls; workers
   drain virtual-thread executors in `@PreDestroy`.
 
@@ -448,3 +453,58 @@ matches their churn.
 constraint, but cross-month duplicate retries (same UUID more than 30 days
 apart) are not — a vanishingly rare scenario in practice given that
 idempotency keys are per-event and not long-lived.
+
+### ADR-009: Circuit breaker + retry on downstream calls
+
+**Decision:** `DownstreamCallService.notify` is wrapped with Resilience4j
+`@Retry` (3 × 200 ms, exponential backoff) and `@CircuitBreaker` (50%
+failure rate over 20 calls, opens for 10 s, auto half-open). Total budget
+stays well below pgmq's visibility-timeout-minus-5s deadline.
+
+**Why both.** Retry absorbs short-tailed transients (connection resets,
+5xx) in-process so blips don't pay the full pgmq round-trip. The breaker
+caps the long tail: a sustained outage would otherwise turn the worker
+pool into a retry generator. Together they compose — retry for blips,
+breaker for outages. 4xx is excluded from `retry-exceptions` so caller
+bugs fail fast.
+
+**Why the fallback rethrows.** `onFailure` logs and rethrows so the
+`EventProcessor` transaction rolls back and pgmq redelivery / DLQ keep
+applying their own outer budget. Two layers, composed not stacked:
+Resilience4j is fast and in-process; pgmq is slow, durable, and survives
+restarts.
+
+**Trade-off:** Two retry layers can multiply attempts in the worst case;
+mitigated by the tight in-process budget (3 × 200 ms ≪ 25 s) and the 4xx
+exclusion. Also requires `DownstreamCallService` to stay a separate bean
+from `EventProcessor` — Spring AOP proxies don't intercept self-invocation.
+
+### ADR-010: PostgreSQL as the storage choice
+
+**Decision:** PostgreSQL is the storage backend, and the codebase is
+intentionally bound to it — JdbcTemplate against Postgres-native SQL, no
+ORM portability layer. pgmq (a Postgres extension) is the in-flight queue.
+
+**Why the lock-in is acceptable.** Two existing constraints already pin
+us to Postgres: pgmq is a Postgres extension used through raw JDBC
+(`pgmq.send`, `pgmq.read`, `FOR UPDATE SKIP LOCKED`), and the schema is
+five tables with no entity-graph traversal — JPA's portability layer has
+nothing to deliver here (see
+[ADR-007](#adr-007-specifications-without-jpa)). Hand-rolled SQL also
+keeps queries readable and partition-prunable on the monthly-partitioned
+`events` table.
+
+**Known trade-off.** With JPA, swapping to MySQL or another OLTP DB would
+be roughly a configuration change. Without it, that swap is a non-trivial
+migration — every query is rewritten and every Postgres-specific feature
+(partial indexes, declarative partitioning, JSONB, `SKIP LOCKED`) needs an
+equivalent. We accept the cost because those same features are exploited
+throughout the design, not incidentally.
+
+**Survives a future broker change.** When pgmq is eventually replaced by
+Kafka at lever #19 in
+[`diagrams/11-scaling-levers.md`](diagrams/11-scaling-levers.md),
+Postgres stays. Events, audit log, and partner credentials are OLTP
+workloads — transactional, indexed, partitioned — where Postgres is
+best-in-class. The broker swap is a delivery-layer change, not a storage
+one; the storage decision is decoupled from the queue decision.
