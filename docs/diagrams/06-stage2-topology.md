@@ -118,13 +118,14 @@ the same `targetQueryValue`.
 
 `partner_id` (not random, not time) is the right routing key for two reasons. It is
 uncorrelated with time, so all shards stay hot in parallel rather than rotating
-one-at-a-time the way time-based routing does (see `07-scaling-bottlenecks.md`). And
-per-partner ordering is preserved: every event for partner X lands on the same shard,
-so one consumer processes that partner's stream in order.
+one-at-a-time the way time-based routing does. And per-partner ordering is
+preserved: every event for partner X lands on the same shard, so one consumer
+processes that partner's stream in order.
 
 Surgical, not blanket — apply only to the saturated event type; leave the other four
 single-queue. When sharding pgmq becomes operationally heavier than the alternative,
-that one queue migrates to Kafka (see `09-actual-scaling-bottlenecks.md`, Layer 5).
+that one queue migrates to Kafka. Both options sit at the expensive end of the
+[scaling lever inventory](07-scaling-and-tradeoffs.md#3-lever-inventory--cost-ordered).
 
 ## What doesn't change between Stage 1 and Stage 2
 

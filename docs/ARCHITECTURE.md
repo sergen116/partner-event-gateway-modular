@@ -1,17 +1,18 @@
 # Architecture
 
 > System architecture, module boundaries, and how the design addresses each
-> non-functional concern from the case spec. Companion to the [README](../README.md)
-> (build/run) and the [diagrams](diagrams/) folder.
+> non-functional concern from the case spec. Companion to the
+> [README](../README.md) (build/run, assumptions, time spent) and the
+> [diagrams](diagrams/) folder (visuals + scaling rationale).
 
 ## 1. Overview
 
-The Partner Event Gateway is a multi-tenant ingest platform for operational events from
-external commerce/logistics partners. Partners authenticate with HMAC-SHA256, submit events
-over HTTPS, and the platform durably accepts, asynchronously processes, audits, and
-exposes those events for query.
+The Partner Event Gateway is a multi-tenant ingest platform for operational events
+from external commerce / logistics partners. Partners authenticate with HMAC-SHA256,
+submit events over HTTPS, and the platform durably accepts, asynchronously processes,
+audits, and exposes those events for query.
 
-The design is shaped by five properties from the case spec:
+Five properties from the case spec shape the design:
 
 1. **Per-tenant isolation** — partners must not see or affect each other's events.
 2. **At-least-once delivery with idempotency** — accepted events must not be lost; duplicates must not double-process.
@@ -21,22 +22,22 @@ The design is shaped by five properties from the case spec:
 
 The implementation runs in two topologies from the same codebase:
 
-- **Stage 1 (default, single process)** — `APP_RUNTIME_MODE=CONSUMER_ALL`, all 5 consumers
-  in one JVM alongside the API. This is what runs locally and what the submission ships
-  configured to use.
-- **Stage 2 (per-queue Deployments)** — same image, one Deployment per role driven by
-  `APP_RUNTIME_MODE`. Each consumer queue scales independently (e.g. via KEDA's postgres
-  scaler against `pgmq.metrics().queue_length`).
+- **Stage 1 (default, single process)** — `APP_RUNTIME_MODE=CONSUMER_ALL`, all 5
+  consumers in one JVM alongside the API. This is what runs locally and what the
+  submission ships configured to use.
+- **Stage 2 (per-queue Deployments)** — same image, one Deployment per role driven
+  by `APP_RUNTIME_MODE`. Each consumer queue scales independently (e.g. via KEDA's
+  postgres scaler against `pgmq.metrics().queue_length`). See
+  [`diagrams/06-stage2-topology.md`](diagrams/06-stage2-topology.md).
 
-The Stage 1→2 transition is configuration-only — no code changes — by design.
+The Stage 1 → 2 transition is configuration-only — no code changes — by design.
 
 ## 2. Modular monolith structure
 
 The case spec leaves "modular monolith vs microservice approach" as an open
-design decision. We pick modular monolith and implement it accordingly.
-Packages are organized by **feature module**, not by technical layer. Each
-module has explicit dependencies documented in its `package-info.java`, and
-the dependency graph is acyclic.
+decision. We pick modular monolith. Packages are organized by **feature module**,
+not by technical layer. Each module documents its dependencies in
+`package-info.java`; the dependency graph is acyclic.
 
 ```
 com.example.peg
@@ -59,90 +60,98 @@ partner ────→ shared, platform
 ```
 
 `ingest`, `delivery`, and `query` all share the `events` table via
-`query.EventRepository`. That cross-module repository is the only shared-state
-boundary; every other module owns its data. The audit module is consumed by
-ingest, delivery, and query (each writes audit rows) but consumes none of them.
+`query.EventRepository` — that cross-module repository is the only shared-state
+boundary; every other module owns its data. The audit module is consumed by ingest,
+delivery, and query (each writes audit rows) but consumes none of them.
 
-This shape matters because Stage 2 deploys the modules differently. An API
-pod runs `ingest` + `query` + `partner` + `audit` writes; a consumer pod runs
-`delivery` + `audit` writes. No code change between deployments — only the
-runtime mode changes which beans get instantiated.
+This shape matters because Stage 2 deploys the modules differently. An API pod runs
+`ingest` + `query` + `partner` + `audit` writes; a consumer pod runs `delivery` +
+`audit` writes. No code change between deployments — only the runtime mode changes
+which beans get instantiated.
 
 ## 3. Component breakdown
 
 ### `partner` module
 
-- `PartnerAuthFilter` — `OncePerRequestFilter` registered for `/api/v1/events*`.
-  Loads the partner from DB, hands the canonical request bytes to `HmacVerifier`,
-  on success sets the resolved `partner_id` as a request attribute.
-- `HmacVerifier` — derives the HMAC key from `SHA-256(secret)` (raw bytes), so
+- **`PartnerAuthFilter`** — `OncePerRequestFilter` registered for `/api/v1/events*`.
+  Loads the partner from DB (Caffeine-cached, 60 s TTL), hands the canonical request
+  bytes to `HmacVerifier`, sets the resolved `partner_id` as a request attribute on
+  success.
+- **`HmacVerifier`** — derives the HMAC key from `SHA-256(secret)` (raw bytes), so
   the raw secret never appears in storage or logs. Constant-time comparison via
-  `MessageDigest.isEqual`. Anti-replay via timestamp window (±5 min). Secret
-  rotation supported through `previous_secret_hash` with an expiry.
-- `CachingRequestWrapper` — body is read once into a buffer so the filter and
+  `MessageDigest.isEqual`. Anti-replay via timestamp window (±5 min). Secret rotation
+  supported through `previous_secret_hash` with an expiry.
+- **`CachingRequestWrapper`** — body is read once into a buffer so the filter and
   Spring's `@RequestBody` deserializer can both consume it.
 
 ### `ingest` module
 
-- `PartnerEventsController` — REST endpoints for partner-facing submit and
-  query. The `partner_id` filter on queries is enforced server-side from the
-  auth context, not from request parameters.
-- `EventIngestService` — single transaction containing both
-  `events.insertIfAbsent` (with idempotency check) and `outbox.insert`.
-  Returns whether this was a fresh insert or a duplicate.
+- **`PartnerEventsController`** — REST endpoints for partner-facing submit and
+  query. The `partner_id` filter on queries is enforced server-side from the auth
+  context, not from request parameters.
+- **`EventIngestService`** — single transaction containing both `events.insertIfAbsent`
+  (with idempotency check) and `outbox.insert`. Returns whether this was a fresh
+  insert or a duplicate.
 
 ### `delivery` module
 
-- `OutboxRepository` + `OutboxPoller` — drain `event_outbox` into pgmq via
-  `FOR UPDATE SKIP LOCKED`. **Rows are deleted on successful send** — see
-  [ADR-006](#adr-006-outbox-delete-on-send) below.
-- `PgmqWorker` (base) + 5 per-event-type subclasses. Each polls one pgmq
-  queue, fans batch processing across virtual threads bounded by a Semaphore,
-  enforces a batch deadline below the visibility timeout via
+- **`OutboxRepository` + `OutboxPoller`** — drain `event_outbox` into pgmq via
+  `FOR UPDATE SKIP LOCKED`. Rows are deleted on successful send — see
+  [ADR-006](#adr-006-outbox-delete-on-send).
+- **`PgmqWorker`** (base) + 5 per-event-type subclasses. Each polls one pgmq queue,
+  fans batch processing across virtual threads bounded by a Semaphore, enforces a
+  batch deadline below the visibility timeout via
   `CompletableFuture.allOf().orTimeout(VT - 5s)`.
-- `EventProcessor` — invoked per message. Claims via `tryMarkProcessing` (silent
-  skip if already terminal), dispatches to a per-type handler, then marks
+- **`EventProcessor`** — invoked per message. Claims via `tryMarkProcessing`
+  (silent skip if already terminal), dispatches to a per-type handler, then marks
   PROCESSED. On exception, the transaction rolls back and pgmq's VT redelivers.
-  Final-attempt FAILED + DLQ archive is the worker's decision via `read_ct >= maxAttempts`.
+  Final-attempt FAILED + DLQ archive is the worker's decision via
+  `read_ct >= maxAttempts`.
+- **`DownstreamCallService`** — single seam between handlers and (mocked) downstream
+  systems, wrapped with Resilience4j `@Retry` and `@CircuitBreaker`. See
+  [ADR-009](#adr-009-circuit-breaker--retry-on-downstream-calls).
 
 ### `query` module
 
-- `EventRepository` — reads/writes against partitioned `events` table.
-  All state-transition methods write an audit row inside the same transaction.
-  Writes use the primary `JdbcTemplate`; `query()` and `count()` use a
-  separate `readJdbc` bound to the read replica when configured (see
-  [§ Read/write split](#readwrite-split)).
-- `EventQuery` — extensible filter specification (partner, type, status, date
+- **`EventRepository`** — reads/writes against the partitioned `events` table. All
+  state-transition methods write an audit row inside the same transaction. Writes
+  use the primary `JdbcTemplate`; `query()` and `count()` use a separate `readJdbc`
+  bound to the read replica when configured (see [§ Read/write split](#readwrite-split)).
+- **`EventQuery`** — extensible filter specification (partner, type, status, date
   range, business ref, processing outcome).
-- `EventSpecifications` — composable filter compilation. Adding a new filter
-  is one line in the registry plus a field on `EventQuery`. See
-  [ADR-007](#adr-007-specifications-without-jpa) below.
-- `InternalEventsController` — cross-partner query endpoint (no auth, per case
-  spec) with the same filter set plus an explicit `partnerId` parameter.
-  Defaults the time window to last 90 days when neither `from` nor `to` is
-  supplied so partition pruning bounds the scan.
+- **`EventSpecifications`** — composable filter compilation. Adding a filter is one
+  line in the registry plus a field on `EventQuery`. See
+  [ADR-007](#adr-007-specifications-without-jpa).
+- **`InternalEventsController`** — cross-partner query endpoint (no auth, per case
+  spec) with the same filter set plus an explicit `partnerId` parameter. Defaults
+  the time window to last 90 days when neither `from` nor `to` is supplied so
+  partition pruning bounds the scan.
 
 ### `audit` module
 
-- `AuditLogger` — single fluent entry point: `auditLogger.transition(...)`.
+- **`AuditLogger`** — single fluent entry point: `auditLogger.transition(...)`.
   Called inside the caller's transaction so audit writes are atomic with the
   operational write.
-- `AuditRecord` — read-side projection. The `event_audit_log` table is
+- **`AuditRecord`** — read-side projection. The `event_audit_log` table is
   append-only — there is no update or delete API.
 
 ### `platform` module
 
-- `RuntimeProperties` — drives the seven-mode topology switch.
-- `ConsumerProperties` — per-queue concurrency caps tuned by I/O profile.
-- `SecurityProperties` — header names, timestamp skew, algorithm.
-- `SchedulingConfig` — multi-threaded `TaskScheduler` (default would serialize
+- **`RuntimeProperties`** — drives the seven-mode topology switch.
+- **`ConsumerProperties`** — per-queue concurrency caps tuned by I/O profile.
+- **`SecurityProperties`** — header names, timestamp skew, algorithm.
+- **`SchedulingConfig`** — multi-threaded `TaskScheduler` (default would serialize
   the 5 worker poll loops).
-- `WorkerRegistrationConfig` + `WorkerScheduler` — programmatic, mode-driven
+- **`WorkerRegistrationConfig` + `WorkerScheduler`** — programmatic, mode-driven
   worker creation. Stage 2 transition is a config change here, not code.
-- `QueueDepthExporter` — `peg.queue.length{queue}` and
-  `peg.queue.oldest_msg_age_seconds{queue}` gauges via Micrometer/Prometheus.
+- **`DataSourceConfig`** — primary writer pool + opt-in replica pool.
+- **`QueueDepthExporter`** — `peg.queue.length{queue}` and
+  `peg.queue.oldest_msg_age_seconds{queue}` gauges via Micrometer/Prometheus,
+  driven from `pgmq.metrics()`.
+- **`HikariPoolHealthIndicator`** — surfaces pool pressure as `DEGRADED` (not
+  `DOWN` — that would fail readiness probes).
 
-## 4. Storage and processing approach
+## 4. Storage and processing
 
 ### Storage tables
 
@@ -155,64 +164,72 @@ runtime mode changes which beans get instantiated.
 | Immutable transition log | `event_audit_log` | monthly by `occurred_at` | 24 months |
 | DLQ / archived failures | `pgmq.a_events_*` | daily by `archived_at` | 4 days |
 
-Both `events` and pgmq live in the same Postgres instance, which lets us put
-the events insert and the outbox insert in a single ACID transaction — the
-property the outbox pattern depends on.
+Both `events` and pgmq live in the same Postgres instance. That lets us put the
+events insert and the outbox insert in a single ACID transaction — the property
+the outbox pattern depends on.
 
 ### Why monthly partitions for `events` and `event_audit_log`
 
-Daily partitions on these tables would create ~365 children per year per
-table, multiplied across two tables = ~720 partitions just for the
-operational and audit stores. That's catalog noise without a corresponding
-operational benefit — these tables aren't queues, they're records.
+Daily partitions on these tables would create ~365 children per year per table —
+~720 across both — without operational benefit. These tables aren't queues, they're
+records. Monthly granularity gives:
 
-Monthly partitions give:
-
-- 12 active partitions for events (12-month retention) + a few future ones — readable in `\dt`
-- Cheap retention via `DROP PARTITION` (O(1) regardless of partition size)
+- ~12 active partitions per table — readable in `\dt`
+- Cheap retention via `DROP PARTITION` (O(1))
 - Partition pruning when queries include `created_at` predicates
-- Cold-tier archive workflow: `retention_keep_table=true` detaches old partitions instead of dropping them, so operations can `pg_dump` and ship to S3 before the actual destruction
+- Cold-tier archive workflow: `retention_keep_table=true` detaches old partitions
+  instead of dropping them, so operations can `pg_dump` and ship to S3 before the
+  actual destruction
 
 ### Why daily partitions for pgmq queues
 
 Different shape, different choice. Queues are write-heavy at the head, read
-constantly, and rotated quickly. Daily granularity matches the operational
-rhythm: a queue partition holds 1 day of in-flight messages, and 4-day
-retention covers a full long weekend.
+constantly, and rotated quickly. Daily granularity matches the operational rhythm:
+a queue partition holds 1 day of in-flight messages, and 4-day retention covers a
+long weekend.
 
 ### Processing flow
 
 1. Partner POSTs HMAC-signed event.
 2. `PartnerAuthFilter` verifies and resolves partner ID.
-3. `EventIngestService` (in one transaction):
-   - Inserts events row (`status=RECEIVED`)
-   - Inserts outbox row
-   - Writes audit row (`null → RECEIVED`)
-4. Returns 200 to partner.
-5. `OutboxPoller` (every 250ms):
+3. `EventIngestService` (one transaction):
+   - INSERT events row (`status=RECEIVED`)
+   - INSERT outbox row (skipped if duplicate idempotency key)
+   - INSERT audit row (`null → RECEIVED`)
+4. Returns 200 to partner with `status=RECEIVED, duplicate=false`.
+5. `OutboxPoller` (every 250 ms, API pods only):
    - Claims a batch with `FOR UPDATE SKIP LOCKED`
-   - For each row: `pgmq.send`, delete outbox row, transition events to PENDING, write audit row (`RECEIVED → PENDING`)
+   - For each row: `pgmq.send`, delete outbox row, transition events to PENDING,
+     write audit row (`RECEIVED → PENDING`)
 6. `PgmqWorker`:
-   - Reads batch from pgmq with VT=30s
+   - Reads batch from pgmq with VT = 30 s
    - Fans out across virtual threads bounded by Semaphore
-   - Each task: `tryMarkProcessing` (audit `PENDING → PROCESSING`), run handler, `markProcessed` (audit `PROCESSING → PROCESSED`), `pgmq.delete`
-   - On final-attempt failure: `pgmq.archive`, `markFailed` (audit `PROCESSING → FAILED`)
+   - Each task: `tryMarkProcessing` (audit `PENDING → PROCESSING`), run handler,
+     `markProcessed` (audit `PROCESSING → PROCESSED`), `pgmq.delete`
+   - On final-attempt failure: `pgmq.archive`, `markFailed` (audit
+     `PROCESSING → FAILED`)
+
+Visualised: [`diagrams/03-ingest-sequence.md`](diagrams/03-ingest-sequence.md),
+[`diagrams/04-consume-sequence.md`](diagrams/04-consume-sequence.md),
+[`diagrams/05-state-machine.md`](diagrams/05-state-machine.md).
 
 ## 5. How the design addresses each non-functional concern
 
 ### Security
 
-- HMAC-SHA256 with per-partner secrets; raw secrets never stored.
+- HMAC-SHA256 with per-partner secrets; raw secrets never stored (only
+  `SHA-256(secret)`).
 - Anti-replay via signed timestamp, ±5 min window.
 - Constant-time signature comparison.
-- Secret rotation supported (previous secret valid until expiry).
-- Authentication filter only on `/api/v1/events*`; observability and
-  internal endpoints are not exposed publicly in production (path-based separation).
+- Secret rotation supported (previous secret valid until `previous_secret_expires_at`).
+- Authentication filter only on `/api/v1/events*`. Observability and internal
+  endpoints are not exposed publicly in production (path-based separation).
 
 ### Tenant isolation
 
 - `partner_id` is part of every event row's identity.
-- Partner queries enforce `partner_id` from the auth context, not request parameters.
+- Partner queries enforce `partner_id` from the auth context, not from request
+  parameters.
 - DB unique constraint on `(partner_id, event_id, created_at)` is per-partner per-month.
 - Two partners can reuse the same UUID without collision.
 
@@ -220,25 +237,26 @@ retention covers a full long weekend.
 
 - `(partner_id, event_id, created_at)` unique constraint blocks duplicate rows
   within a calendar month.
-- `Idempotency-Key` header lets partners drive the event ID; without it, server generates one.
-- Repeated submissions return 200 with `duplicate=true` and the original event's status.
+- `Idempotency-Key` header lets partners drive the event ID; without it, server
+  generates one.
+- Repeated submissions return 200 with `duplicate=true` and the original event's
+  current status.
 - Worker-side: `tryMarkProcessing` checks the row state — already-terminal rows
   are silently skipped, even if pgmq redelivers.
 
 ### Reliability
 
-- Transactional outbox: events insert and outbox insert commit atomically.
+- **Transactional outbox**: events insert and outbox insert commit atomically.
   Crash before pgmq.send → outbox poller picks up on next run.
-- pgmq visibility timeout: a worker crash mid-processing reverts state via
+- **pgmq visibility timeout**: a worker crash mid-processing reverts state via
   transaction rollback; pgmq redelivers after VT.
-- DLQ: messages exceeding `maxAttempts` move to the pgmq archive table and
-  the events row is marked FAILED.
-- Downstream resilience: `DownstreamCallService.notify` is wrapped with
-  Resilience4j `@Retry` + `@CircuitBreaker` so transient downstream blips
-  are absorbed in-process and sustained outages trip a breaker instead of
-  draining the worker pool. Rationale and budgets in
-  [ADR-009](#adr-009-circuit-breaker--retry-on-downstream-calls).
-- Graceful shutdown: TaskScheduler awaits VT+5s for in-flight polls; workers
+- **DLQ**: messages exceeding `maxAttempts` (default 5) move to the pgmq archive
+  table and the events row is marked FAILED.
+- **Downstream resilience**: `DownstreamCallService.notify` is wrapped with
+  Resilience4j `@Retry` + `@CircuitBreaker` so transient downstream blips are
+  absorbed in-process and sustained outages trip a breaker instead of draining
+  the worker pool. See [ADR-009](#adr-009-circuit-breaker--retry-on-downstream-calls).
+- **Graceful shutdown**: TaskScheduler awaits VT + 5 s for in-flight polls; workers
   drain virtual-thread executors in `@PreDestroy`.
 
 ### Concurrency
@@ -246,7 +264,7 @@ retention covers a full long weekend.
 - Multiple worker pods per queue: pgmq's `FOR UPDATE SKIP LOCKED` is the
   coordination mechanism. No application locks.
 - Multiple outbox pollers (one per API pod): same `SKIP LOCKED` claim.
-- Per-worker virtual threads bounded by Semaphore: VTs cheap, DB connections
+- Per-worker virtual threads bounded by Semaphore: VTs are cheap, DB connections
   expensive.
 - Atomic state transitions: every transition is one UPDATE with a status filter,
   not read-then-write.
@@ -255,106 +273,105 @@ retention covers a full long weekend.
 
 - Every state transition writes an immutable row to `event_audit_log`.
 - Audit writes are atomic with the operational UPDATE — same transaction.
-- 24-month retention outlasts the 12-month operational retention, so
-  compliance lookups remain available after the events row is gone.
-- `actor` column attributes each transition to its source: `"ingest"`,
-  `"outbox-poller"`, `"worker:order-created"`, etc.
+- 24-month retention outlasts the 12-month operational retention, so compliance
+  lookups remain available after the events row is gone.
+- `actor` column attributes each transition: `"ingest"`, `"outbox-poller"`,
+  `"worker:order-created"`, etc.
 
-### Availability / performance
+### Availability and performance
 
 - Stateless API + stateless workers — both horizontally scalable.
 - Per-event-type queues let high-volume types (e.g. `OrderCreated`) scale
   independently of low-volume types (`OrderCancelled`).
-- The same Docker image runs in 7 runtime modes — no per-role builds.
-- Read-replica for the query path is wired opt-in via `REPLICA_DB_URL`;
-  unset → reads share the primary pool. See [§ Read/write split](#readwrite-split).
+- Same Docker image runs in 7 runtime modes — no per-role builds.
+- Read-replica for the query path is wired opt-in via `REPLICA_DB_URL`; unset →
+  reads share the primary pool. See [§ Read/write split](#readwrite-split).
 - Daily partitioning + 4-day retention on pgmq queues means cleanup is
   `DROP PARTITION`, not `DELETE` — no autovacuum bloat on hot tables.
-- Monthly partitioning with 12/24-month retention on operational/audit
-  tables means cold-tier archival is an `ALTER TABLE … DETACH PARTITION`
-  followed by `pg_dump` to S3.
-- Query-side partition pruning: both controllers default the time window to
-  last 90 days when not explicitly bounded, so unfiltered queries don't
-  scan all 12 months of partitions.
-- For the full ladder of scaling levers (config-tunable today through to
-  Kafka migration / DB sharding), with current implementation status per
-  lever, see [`diagrams/11-scaling-levers.md`](diagrams/11-scaling-levers.md).
+- Monthly partitioning with 12 / 24-month retention on operational / audit tables
+  means cold-tier archival is `ALTER TABLE … DETACH PARTITION` followed by
+  `pg_dump` to S3.
+- Both query controllers default the time window to last 90 days when not
+  explicitly bounded, so unfiltered queries don't scan all 12 months.
+- For the full ladder of scaling levers (config-tunable today through to Kafka
+  migration / DB sharding), with current implementation status per lever, see
+  [`diagrams/07-scaling-and-tradeoffs.md`](diagrams/07-scaling-and-tradeoffs.md).
 
 ### Connection budget
 
-The Hikari pool default is 40 (override per-pod via `HIKARI_MAX`). The
-worst-case in-flight demand sits in `CONSUMER_ALL` mode, which is the
-configured default for local/single-pod deploys:
+The Hikari pool default is `HIKARI_MAX=40` (override per-pod). The worst-case
+in-flight demand sits in `CONSUMER_ALL` mode, which is the configured default for
+local / single-pod deploys:
 
-| Holder                              | Worst-case connections |
-|-------------------------------------|------------------------|
-| Worker semaphores (8+6+4+2+4)       | 24                     |
-| API request handlers (typical peak) | 5–10                   |
-| OutboxPoller drain transaction      | 1                      |
-| QueueDepthExporter scrape           | 1                      |
-| **Total**                           | **31–35**              |
+| Holder | Worst-case connections |
+|---|---|
+| Worker semaphores (8+6+4+2+4) | 24 |
+| API request handlers (typical peak) | 5–10 |
+| OutboxPoller drain transaction | 1 |
+| QueueDepthExporter scrape | 1 |
+| **Total** | **31–35** |
 
-40 leaves ~5 connections of headroom for transient slow-downstream events
-that pin a transaction. Split-role pods (`API`, `CONSUMER_<TYPE>`) sit far
-below this — a single per-type consumer pod tops out at its worker
-concurrency (≤ 8), so `HIKARI_MAX=10` is a reasonable per-role override.
+40 leaves ~5 connections of headroom for transient slow-downstream events that pin
+a transaction. Split-role pods (`API`, `CONSUMER_<TYPE>`) sit far below this — a
+single per-type consumer pod tops out at its worker concurrency (≤ 8), so
+`HIKARI_MAX=10` is a reasonable per-role override.
 
 Runtime observation: Hikari Micrometer metrics are exposed at
 `/actuator/prometheus` (`hikaricp_connections_pending`,
-`hikaricp_connections_timeout_total`, etc.). A
-`HikariPoolHealthIndicator` flips `/actuator/health/hikariPool` to
-`DEGRADED` (not `DOWN` — that would fail readiness probes) whenever
-`threadsAwaitingConnection > 0` on either pool.
+`hikaricp_connections_timeout_total`, etc.). `HikariPoolHealthIndicator` flips
+`/actuator/health/hikariPool` to `DEGRADED` (not `DOWN` — that would fail
+readiness probes) whenever `threadsAwaitingConnection > 0` on either pool.
 
 ### Read/write split
 
-Cross-partner and internal event queries (`EventRepository.query()` and
-`count()`, hit by `InternalEventsController`) route to a read replica
-when `REPLICA_DB_URL` is set. Writes — and any read inside a write
-transaction — always go to the primary. If `REPLICA_DB_URL` is unset,
-the read template falls back to the primary pool, so local dev and CI
-work unchanged on a single Postgres. Wiring lives in
+Cross-partner and internal event queries (`EventRepository.query()` and `count()`,
+hit by `InternalEventsController`) route to a read replica when `REPLICA_DB_URL` is
+set. Writes — and any read inside a write transaction — always go to the primary.
+If `REPLICA_DB_URL` is unset, the read template falls back to the primary pool, so
+local dev and CI work unchanged on a single Postgres. Wiring lives in
 `platform/DataSourceConfig.java`.
 
 ### Maintainability
 
-- Adding a new event type: enum value + queue migration + worker subclass
-  + concurrency config entry. Five small files.
+- Adding a new event type: enum value + queue migration + worker subclass +
+  concurrency config entry. Five small files.
 - Adding a new query filter: one field on `EventQuery` + one entry in
   `EventSpecifications.SPECS`. Two lines.
-- Adding a new runtime mode: one enum value + one switch arm in
-  `RuntimeProperties` + one Deployment manifest.
-- Adding a new audit-row consumer: query `AuditLogger.historyFor(...)`.
+- Adding a new runtime mode: one enum value + one switch arm in `RuntimeProperties`
+  + one Deployment manifest.
+- Querying the audit history of any event: `AuditLogger.historyFor(...)`.
 
 ## 6. Observability
 
-All three pillars — **logs, metrics, traces** — ship from one Spring Boot
-process, correlated by a shared `trace_id`. Endpoints (`management.endpoints`):
+All three pillars — **logs, metrics, traces** — ship from one Spring Boot process,
+correlated by a shared `trace_id`. Endpoints (`management.endpoints`):
 `/actuator/health`, `/actuator/prometheus`, `/actuator/metrics`,
-`/actuator/circuitbreakers`, `/actuator/retries`. In production these stay off
-the partner-facing port — `PartnerAuthFilter` only guards `/api/v1/events*`,
-so `/actuator/**` must not be routed from public LBs.
+`/actuator/circuitbreakers`, `/actuator/retries`. In production these stay off the
+partner-facing port — `PartnerAuthFilter` only guards `/api/v1/events*`, so
+`/actuator/**` must not be routed from public LBs.
 
 ### Logs — SLF4J / Logback ([`logback-spring.xml`](../src/main/resources/logback-spring.xml))
 
-Two profiles: default human-readable console pattern (local/tests), and `json`
+Two profiles: default human-readable console pattern (local / tests), and `json`
 profile with `LogstashEncoder` for stdout JSON in prod
 (`SPRING_PROFILES_ACTIVE=json`). MDC fields populated at boundaries:
-`trace_id`/`span_id` automatically by Micrometer Tracing; `partner_id` by
-`PartnerAuthFilter`; `event_id` by `PartnerEventsController`; and
-`queue`/`msg_id`/`event_type`/`partner_id`/`event_id` re-set by `PgmqWorker`
-after payload deserialization — so async logs carry the same identifiers as
-the originating HTTP request. In prod, ship stdout via the cluster log agent
-(Promtail → Loki, Fluent-Bit → ELK, etc.); `trace_id` is the join key against
-traces.
+
+- `trace_id` / `span_id` automatically by Micrometer Tracing
+- `partner_id` by `PartnerAuthFilter`
+- `event_id` by `PartnerEventsController`
+- `queue` / `msg_id` / `event_type` / `partner_id` / `event_id` re-set by
+  `PgmqWorker` after payload deserialization
+
+Async logs carry the same identifiers as the originating HTTP request. In prod,
+ship stdout via the cluster log agent (Promtail → Loki, Fluent-Bit → ELK, etc.);
+`trace_id` is the join key against traces.
 
 ### Metrics — Micrometer / Prometheus
 
 Scraped at `/actuator/prometheus`. Common tags `application` and
-`role=${APP_RUNTIME_MODE}` are applied globally so per-role pods produce
-distinct time series. Built-in: JVM, `http_server_requests_*`,
-`hikaricp_connections_*`, Logback events, Resilience4j breaker/retry. App
-metrics (`peg.*` family):
+`role=${APP_RUNTIME_MODE}` are applied globally so per-role pods produce distinct
+time series. Built-in: JVM, `http_server_requests_*`, `hikaricp_connections_*`,
+Logback events, Resilience4j breaker / retry. App metrics (`peg.*` family):
 
 | Metric | Type | Source | Tells you |
 |---|---|---|---|
@@ -371,19 +388,17 @@ breaker `OPEN`, `hikaricp_connections_pending > 0` sustained, 5xx rate > 0.
 
 ### Traces — Micrometer Tracing → OpenTelemetry → OTLP/HTTP
 
-W3C propagation (`traceparent`/`tracestate`). **Always-on context, opt-in
-export:** spans are always created and `trace_id`/`span_id` always flow into
-MDC, but the OTLP exporter is only registered when
-`MANAGEMENT_OTLP_TRACING_ENDPOINT` is set — so logs stay correlatable
-locally with no collector running, and there's no `Connection refused` noise.
-Sampling: `management.tracing.sampling.probability` (env `TRACING_SAMPLING`,
-default `0.1`).
+W3C propagation (`traceparent` / `tracestate`). **Always-on context, opt-in export:**
+spans are always created and `trace_id` / `span_id` always flow into MDC, but the
+OTLP exporter is only registered when `MANAGEMENT_OTLP_TRACING_ENDPOINT` is set —
+so logs stay correlatable locally with no collector running, and there's no
+`Connection refused` noise. Sampling: `management.tracing.sampling.probability`
+(env `TRACING_SAMPLING`, default `0.1`).
 
-The async boundary is bridged by `TraceContextCarrier`: the HTTP span's W3C
-headers are inlined into the `PartnerEventMessage` JSON, then `PgmqWorker`
-extracts them and opens a `CONSUMER`-kind span as child of the producer
-context. One trace covers `HTTP POST /events → outbox → pgmq → worker →
-DownstreamCallService`.
+The async boundary is bridged by `TraceContextCarrier`: the HTTP span's W3C headers
+are inlined into the `PartnerEventMessage` JSON, then `PgmqWorker` extracts them and
+opens a `CONSUMER`-kind span as child of the producer context. One trace covers
+`HTTP POST /events → outbox → pgmq → worker → DownstreamCallService`.
 
 Local visualization (optional):
 
@@ -394,238 +409,220 @@ TRACING_SAMPLING=1.0 mvn spring-boot:run
 ```
 
 Prod: point the env var at an in-cluster OpenTelemetry Collector
-(`http://otel-collector.observability:4318/v1/traces`); the collector
-fans out to Tempo/Jaeger/Honeycomb/etc.
+(`http://otel-collector.observability:4318/v1/traces`); the collector fans out
+to Tempo / Jaeger / Honeycomb / etc.
 
 ### Health and correlation
 
-`/actuator/health` aggregates Spring Boot's built-ins (DB ping, disk, Flyway),
-the Resilience4j breaker indicator, and `HikariPoolHealthIndicator` — which
-returns `DEGRADED` (not `DOWN`, see [§5 Connection budget](#connection-budget))
-when callers queue for a connection so the pod stays in service while pool
-pressure is visible. Pivots: logs by `partner_id`/`event_id` → `trace_id` →
-trace UI for end-to-end timing; queue gauges + `peg.consumer.duration` for
-worker throughput; breaker/DLQ counters for downstream issues.
+`/actuator/health` aggregates Spring Boot's built-ins (DB ping, disk, Flyway), the
+Resilience4j breaker indicator, and `HikariPoolHealthIndicator` — which returns
+`DEGRADED` (not `DOWN`, see [§ Connection budget](#connection-budget)) when callers
+queue for a connection so the pod stays in service while pool pressure is visible.
+Pivots: logs by `partner_id` / `event_id` → `trace_id` → trace UI for end-to-end
+timing; queue gauges + `peg.consumer.duration` for worker throughput; breaker /
+DLQ counters for downstream issues.
 
 ## 7. Architecture decision records (short form)
 
 ### ADR-001: HMAC key derivation
 
-**Decision:** Store SHA-256 hex of the partner's secret. Both sides derive
-raw bytes from the hash and use those as the HMAC key.
+**Decision:** Store SHA-256 hex of the partner's secret. Both sides derive raw bytes
+from the hash and use those as the HMAC key.
 
-**Why:** The raw secret never appears in the DB, so a SQL-level data leak
-doesn't disclose it. An attacker who compromises the DB can still impersonate
-the partner — they have the HMAC key — but at least the secret-as-string is
-contained.
+**Why:** The raw secret never appears in the DB, so a SQL-level data leak doesn't
+disclose it. An attacker who compromises the DB can still impersonate the partner —
+they have the HMAC key — but the secret-as-string is contained.
 
 **Trade-off:** Not the same as a non-recoverable hash (BCrypt, Argon2). Real
-production would put the secret in a KMS or sealed secret store and sign on
-the gateway side. The current design is the documented case-study
-simplification — strictly better than plaintext, worse than KMS-backed.
+production would put the secret in a KMS or sealed secret store and sign on the
+gateway side. The current design is a documented case-study simplification —
+strictly better than plaintext, worse than KMS-backed.
 
-### ADR-002: Transactional outbox vs direct pgmq.send
+### ADR-002: Transactional outbox vs direct `pgmq.send`
 
-**Decision:** API writes events row + outbox row in one transaction; a
-separate poller forwards outbox rows into pgmq.
+**Decision:** API writes the events row + outbox row in one transaction; a separate
+poller forwards outbox rows into pgmq.
 
-**Atomicity is not the reason.** Because pgmq is just a set of Postgres
-tables in the same database, `INSERT INTO events` and `pgmq.send` *can*
-share a single transaction — both commit or both roll back. The classical
-"dual-write" problem (DB write + message broker call to a different
-system) does not exist here. A direct `pgmq.send` inside the ingest
-transaction would be atomic by Postgres ACID alone.
+**Atomicity is not the reason.** Because pgmq is just a set of Postgres tables in
+the same database, `INSERT INTO events` and `pgmq.send` *can* share a single
+transaction — both commit or both roll back. The classical "dual-write" problem
+does not exist here. A direct `pgmq.send` inside the ingest transaction would be
+atomic by Postgres ACID alone.
 
-**Why outbox anyway.** Three specific properties that direct send doesn't
-provide:
+**Why outbox anyway.** Three specific properties direct send doesn't provide:
 
-1. **Future-proofing for external brokers.** If we eventually swap pgmq
-   for Kafka, SQS, or any non-Postgres broker, the ingest path stays
-   unchanged. Only the relay (`OutboxPoller`) needs to be rewritten — a
-   single background component, not the API hot path.
-2. **Shorter ingest transactions and bloat isolation.** Direct send keeps
-   the API transaction open across `pgmq.send`'s extension code and pgmq
-   table writes. Outbox keeps the API transaction down to two plain
-   INSERTs (events + outbox) and moves the pgmq churn — including its
-   eventual vacuum cost — into the poller's transaction, off the
-   partner-facing path.
-3. **Separation of concerns.** The ingest module never imports pgmq; it
-   writes a queue-agnostic JSON payload to `event_outbox`. Only the
-   delivery module knows about pgmq, which keeps modular boundaries clean
-   and means ingest's tests don't need pgmq running.
+1. **Future-proofing for external brokers.** If pgmq is eventually swapped for
+   Kafka, SQS, or any non-Postgres broker, the ingest path stays unchanged. Only
+   the relay (`OutboxPoller`) gets rewritten — a single background component, not
+   the API hot path.
+2. **Shorter ingest transactions and bloat isolation.** Direct send keeps the API
+   transaction open across `pgmq.send`'s extension code and pgmq table writes.
+   Outbox keeps the API transaction down to two plain INSERTs (events + outbox)
+   and moves the pgmq churn — including its eventual vacuum cost — into the
+   poller's transaction, off the partner-facing path.
+3. **Separation of concerns.** The ingest module never imports pgmq; it writes a
+   queue-agnostic JSON payload to `event_outbox`. Only the delivery module knows
+   about pgmq, which keeps modular boundaries clean and means ingest's tests don't
+   need pgmq running.
 
-**Trade-off:** ~250 ms median forwarding latency between API ack and
-queue arrival (one poll interval). Partner sees 200 OK as soon as the row
-is durably accepted; queue delivery is eventually consistent. Acceptable
-for an event ingest gateway.
+**Trade-off:** ~250 ms median forwarding latency between API ack and queue arrival
+(one poll interval). Partner sees 200 OK as soon as the row is durably accepted;
+queue delivery is eventually consistent. Acceptable for an event ingest gateway.
 
-For the long-form per-concern breakdown — six operational distinctions,
-an incident simulator, and the at-a-glance scorecard — see
-[`docs/diagrams/08-outbox-vs-direct-pgmq.md`](diagrams/08-outbox-vs-direct-pgmq.md)
-and [`docs/diagrams/10-outbox-scorecard.md`](diagrams/10-outbox-scorecard.md).
+For the at-a-glance scorecard and the incident-shape comparison see
+[`diagrams/07-scaling-and-tradeoffs.md`](diagrams/07-scaling-and-tradeoffs.md).
 
 ### ADR-003: Per-event-type queues
 
-**Decision:** One pgmq queue per event type, partitioned daily with 4-day
-retention.
+**Decision:** One pgmq queue per event type, partitioned daily with 4-day retention.
 
-**Why:** Different event types have different processing profiles. One queue
-forces shared scaling and head-of-line blocking; per-type queues enable
-Stage 2's independent scaling.
+**Why:** Different event types have different processing profiles. One shared queue
+forces shared scaling and head-of-line blocking; per-type queues enable Stage 2's
+independent scaling.
 
-**Trade-off:** 5x the operational surface (5 queues, 5 metrics dashboards,
-5 worker classes). In Stage 1 mode this is negligible.
+**Trade-off:** 5× the operational surface (5 queues, 5 metrics dashboards, 5 worker
+classes). In Stage 1 mode this is negligible.
 
 ### ADR-004: Virtual threads + Semaphore
 
-**Decision:** Each consumer worker fans batch processing across virtual
-threads bounded by a per-worker Semaphore.
+**Decision:** Each consumer worker fans batch processing across virtual threads
+bounded by a per-worker Semaphore.
 
-**Why:** Message processing is I/O-bound. Virtual threads park on I/O
-instead of blocking carriers. The Semaphore caps logical concurrency at the
-DB-connection budget.
+**Why:** Message processing is I/O-bound. Virtual threads park on I/O instead of
+blocking carriers. The Semaphore caps logical concurrency at the DB-connection
+budget.
 
-**Trade-off:** Requires Java 21+ and Hikari 5.1.0+ (for non-pinning
-compatibility). Both bundled with Spring Boot 3.2+.
+**Trade-off:** Requires Java 21+ and Hikari 5.1.0+ (for non-pinning compatibility).
+Both bundled with Spring Boot 3.2+.
 
 ### ADR-005: Same image, 7 runtime modes
 
 **Decision:** One Docker image. `APP_RUNTIME_MODE` env var picks API,
 all-consumers, or a single-type consumer.
 
-**Why:** Operationally simpler than per-role builds. Stage 2 deploys the
-same image into per-role Deployments.
+**Why:** Operationally simpler than per-role builds. Stage 2 deploys the same
+image into per-role Deployments.
 
-**Trade-off:** Image is slightly larger than each role strictly needs.
-Negligible — JRE + Spring Boot dwarfs the application code.
+**Trade-off:** Image is slightly larger than each role strictly needs. Negligible —
+JRE + Spring Boot dwarfs the application code.
 
 ### ADR-006: Outbox delete-on-send
 
-**Decision:** Delete the outbox row immediately on successful pgmq forward,
-rather than setting a `sent_at` timestamp and sweeping later.
+**Decision:** Delete the outbox row immediately on successful pgmq forward, rather
+than setting a `sent_at` timestamp and sweeping later.
 
 **Why:** The events table is the audit source of truth — `audit.historyFor`
 returns the canonical timeline of every transition including the
-`RECEIVED → PENDING` moment that maps to "outbox forwarded successfully."
-Keeping the outbox row adds nothing; the table either stays small forever
-(delete-on-send) or grows unboundedly without a sweeper.
+`RECEIVED → PENDING` moment that maps to "outbox forwarded successfully". Keeping
+the outbox row adds nothing; the table either stays small forever (delete-on-send)
+or grows unboundedly without a sweeper.
 
-**Trade-off:** The pgmq message ID isn't kept anywhere on the application
-side. Operations who want to query pgmq directly via the message ID must
-trace it from pgmq's own metadata, not the events table. Acceptable —
-operations rarely need this in practice.
+**Trade-off:** The pgmq message ID isn't kept anywhere on the application side.
+Operations who want to query pgmq directly via the message ID must trace it from
+pgmq's own metadata, not the events table. Acceptable — operations rarely need
+this in practice.
 
 ### ADR-007: Specifications without JPA
 
-**Decision:** The persistence layer is JdbcTemplate + raw SQL throughout —
-no JPA, no Hibernate, no Spring Data JPA. Dynamic event filtering is
-implemented in `EventSpecifications` as a registry of small functions that
-compile into SQL fragments and bound parameters.
+**Decision:** The persistence layer is JdbcTemplate + raw SQL throughout — no JPA,
+no Hibernate, no Spring Data JPA. Dynamic event filtering is implemented in
+`EventSpecifications` as a registry of small functions that compile into SQL
+fragments and bound parameters.
 
-**Why no JPA at all:**
+**Why no JPA:**
 
 - **pgmq is JDBC-native.** Core operations (`pgmq.send`, `pgmq.read`,
-  `pgmq.archive`) are SQL function calls; the outbox poller and workers
-  use `SELECT … FOR UPDATE SKIP LOCKED`. JPA can't express these
-  idiomatically — every pgmq touch point would drop to
-  `@Query(nativeQuery=true)` regardless. Adopting JPA would produce a
-  hybrid stack (JPA for entities + JDBC for pgmq) where one stack already
-  does the job.
-- **Few tables, no object graph.** Five tables (`partners`, `events`,
-  `event_outbox`, `event_audit_log`, plus pgmq's internal tables) with
-  deliberately no FKs between the audit, outbox, and events tables (see
-  the ERD doc). JPA's value — transparent navigation of `@OneToMany` /
+  `pgmq.archive`) are SQL function calls; the outbox poller and workers use
+  `SELECT … FOR UPDATE SKIP LOCKED`. JPA can't express these idiomatically — every
+  pgmq touchpoint would drop to `@Query(nativeQuery=true)` regardless. Adopting JPA
+  would produce a hybrid stack where one stack already does the job.
+- **Few tables, no object graph.** Five tables with deliberately no FKs between
+  audit, outbox, and events. JPA's value — transparent navigation of `@OneToMany` /
   `@ManyToOne` — has nothing to navigate here.
-- **One dependency, one mental model.** Adding JPA means two transaction
-  managers (or a chained one), two result-mapping styles, plus Hibernate's
-  runtime overhead (first-level cache, dirty checking, lazy proxies) that
-  buys nothing on a high-throughput ingest path with no entity graph.
-- **Already Postgres-locked.** pgmq is a Postgres extension, so the system
-  is committed to Postgres permanently. JPA's main portability promise —
-  "swap the DB vendor without rewriting queries" — has nothing to deliver
-  here. Postgres-specific SQL (`FOR UPDATE SKIP LOCKED`, partial indexes,
-  `JSONB`, partitioning DDL, `pgmq.*` functions) is used freely with no
-  vendor-neutrality cost.
+- **One dependency, one mental model.** Adding JPA means two transaction managers
+  (or a chained one), two result-mapping styles, plus Hibernate's runtime overhead
+  (first-level cache, dirty checking, lazy proxies) that buys nothing on a
+  high-throughput ingest path with no entity graph.
+- **Already Postgres-locked.** pgmq is a Postgres extension, so the system is
+  committed to Postgres. JPA's main portability promise has nothing to deliver
+  here. Postgres-specific SQL (`FOR UPDATE SKIP LOCKED`, partial indexes, `JSONB`,
+  partitioning DDL, `pgmq.*` functions) is used freely with no vendor-neutrality
+  cost.
 
-**Why hand-rolled Specifications:** The case spec calls for an extensible
-filter API. We needed the *pattern* — composable optional predicates — not
-the JPA implementation of it. `EventSpecifications` is a five-line registry
-where adding a filter is one line plus one `EventQuery` field. SQL stays
-one read away, which matters for keeping queries partition-prunable on the
-monthly-partitioned `events` table.
+**Why hand-rolled Specifications:** The case spec calls for an extensible filter
+API. We need the *pattern* — composable optional predicates — not the JPA
+implementation of it. `EventSpecifications` is a five-line registry where adding a
+filter is one line plus one `EventQuery` field. SQL stays one read away, which
+matters for keeping queries partition-prunable on the monthly-partitioned `events`
+table.
 
-**Trade-off:** Developers who reach for `JpaSpecificationExecutor` by
-reflex have to read the module to recognise the pattern. Mitigated by the
-registry being literally five lines and the design being documented here.
+**Trade-off:** Developers who reach for `JpaSpecificationExecutor` by reflex have
+to read the module to recognise the pattern. Mitigated by the registry being five
+lines and the design being documented here.
 
 ### ADR-008: Monthly partitioning for events and audit
 
-**Decision:** `events` and `event_audit_log` partitioned monthly. pgmq
-queues partitioned daily.
+**Decision:** `events` and `event_audit_log` partitioned monthly. pgmq queues
+partitioned daily.
 
-**Why:** Different shape, different cadence. The events table is a record
-that lives for months; daily partitions there create catalog noise without
-operational benefit. Monthly partitions align with the natural operational
-rhythm: a single partition is the right granularity to detach for cold
-storage. pgmq queues are write-heavy at the head and rotate quickly; daily
-matches their churn.
+**Why:** Different shape, different cadence. The events table is a record that
+lives for months; daily partitions there create catalog noise without operational
+benefit. Monthly partitions align with the natural operational rhythm: a single
+partition is the right granularity to detach for cold storage. pgmq queues are
+write-heavy at the head and rotate quickly; daily matches their churn.
 
-**Trade-off:** Within-month idempotency is guaranteed by the unique
-constraint, but cross-month duplicate retries (same UUID more than 30 days
-apart) are not — a vanishingly rare scenario in practice given that
-idempotency keys are per-event and not long-lived.
+**Trade-off:** Within-month idempotency is guaranteed by the unique constraint, but
+cross-month duplicate retries (same UUID more than 30 days apart) are not — a
+vanishingly rare scenario in practice given that idempotency keys are per-event
+and not long-lived.
 
 ### ADR-009: Circuit breaker + retry on downstream calls
 
-**Decision:** `DownstreamCallService.notify` is wrapped with Resilience4j
-`@Retry` (3 × 200 ms, exponential backoff) and `@CircuitBreaker` (50%
-failure rate over 20 calls, opens for 10 s, auto half-open). Total budget
-stays well below pgmq's visibility-timeout-minus-5s deadline.
+**Decision:** `DownstreamCallService.notify` is wrapped with Resilience4j `@Retry`
+(3 × 200 ms, exponential backoff) and `@CircuitBreaker` (50% failure rate over a
+20-call sliding window with `minimum-number-of-calls=10`, opens for 10 s, auto
+half-open). Total budget stays well below pgmq's
+`visibility-timeout-minus-5s` deadline.
 
-**Why both.** Retry absorbs short-tailed transients (connection resets,
-5xx) in-process so blips don't pay the full pgmq round-trip. The breaker
-caps the long tail: a sustained outage would otherwise turn the worker
-pool into a retry generator. Together they compose — retry for blips,
-breaker for outages. 4xx is excluded from `retry-exceptions` so caller
-bugs fail fast.
+**Why both.** Retry absorbs short-tailed transients (connection resets, 5xx)
+in-process so blips don't pay the full pgmq round-trip. The breaker caps the long
+tail: a sustained outage would otherwise turn the worker pool into a retry
+generator. Together they compose — retry for blips, breaker for outages. 4xx is
+excluded from `retry-exceptions` so caller bugs fail fast.
 
 **Why the fallback rethrows.** `onFailure` logs and rethrows so the
-`EventProcessor` transaction rolls back and pgmq redelivery / DLQ keep
-applying their own outer budget. Two layers, composed not stacked:
-Resilience4j is fast and in-process; pgmq is slow, durable, and survives
-restarts.
+`EventProcessor` transaction rolls back and pgmq redelivery / DLQ keep applying
+their own outer budget. Two layers, composed not stacked: Resilience4j is fast and
+in-process; pgmq is slow, durable, and survives restarts.
 
-**Trade-off:** Two retry layers can multiply attempts in the worst case;
-mitigated by the tight in-process budget (3 × 200 ms ≪ 25 s) and the 4xx
-exclusion. Also requires `DownstreamCallService` to stay a separate bean
-from `EventProcessor` — Spring AOP proxies don't intercept self-invocation.
+**Trade-off:** Two retry layers can multiply attempts in the worst case; mitigated
+by the tight in-process budget (3 × 200 ms ≪ 25 s) and the 4xx exclusion. Also
+requires `DownstreamCallService` to stay a separate bean from `EventProcessor` —
+Spring AOP proxies don't intercept self-invocation.
 
 ### ADR-010: PostgreSQL as the storage choice
 
-**Decision:** PostgreSQL is the storage backend, and the codebase is
-intentionally bound to it — JdbcTemplate against Postgres-native SQL, no
-ORM portability layer. pgmq (a Postgres extension) is the in-flight queue.
+**Decision:** PostgreSQL is the storage backend, and the codebase is intentionally
+bound to it — JdbcTemplate against Postgres-native SQL, no ORM portability layer.
+pgmq (a Postgres extension) is the in-flight queue.
 
-**Why the lock-in is acceptable.** Two existing constraints already pin
-us to Postgres: pgmq is a Postgres extension used through raw JDBC
-(`pgmq.send`, `pgmq.read`, `FOR UPDATE SKIP LOCKED`), and the schema is
-five tables with no entity-graph traversal — JPA's portability layer has
-nothing to deliver here (see
-[ADR-007](#adr-007-specifications-without-jpa)). Hand-rolled SQL also
-keeps queries readable and partition-prunable on the monthly-partitioned
+**Why the lock-in is acceptable.** Two existing constraints already pin us to
+Postgres: pgmq is a Postgres extension used through raw JDBC, and the schema is
+five tables with no entity-graph traversal — JPA's portability layer has nothing
+to deliver here (see [ADR-007](#adr-007-specifications-without-jpa)). Hand-rolled
+SQL also keeps queries readable and partition-prunable on the monthly-partitioned
 `events` table.
 
-**Known trade-off.** With JPA, swapping to MySQL or another OLTP DB would
-be roughly a configuration change. Without it, that swap is a non-trivial
-migration — every query is rewritten and every Postgres-specific feature
-(partial indexes, declarative partitioning, JSONB, `SKIP LOCKED`) needs an
-equivalent. We accept the cost because those same features are exploited
-throughout the design, not incidentally.
+**Known trade-off.** With JPA, swapping to MySQL or another OLTP DB would be
+roughly a configuration change. Without it, that swap is a non-trivial migration —
+every query is rewritten and every Postgres-specific feature (partial indexes,
+declarative partitioning, JSONB, `SKIP LOCKED`) needs an equivalent. We accept the
+cost because those same features are exploited throughout the design, not
+incidentally.
 
-**Survives a future broker change.** When pgmq is eventually replaced by
-Kafka at lever #19 in
-[`diagrams/11-scaling-levers.md`](diagrams/11-scaling-levers.md),
-Postgres stays. Events, audit log, and partner credentials are OLTP
-workloads — transactional, indexed, partitioned — where Postgres is
-best-in-class. The broker swap is a delivery-layer change, not a storage
-one; the storage decision is decoupled from the queue decision.
+**Survives a future broker change.** When pgmq is eventually replaced by Kafka at
+lever #19 in [`diagrams/07-scaling-and-tradeoffs.md`](diagrams/07-scaling-and-tradeoffs.md),
+Postgres stays. Events, audit log, and partner credentials are OLTP workloads —
+transactional, indexed, partitioned — where Postgres is best-in-class. The broker
+swap is a delivery-layer change, not a storage one; the storage decision is
+decoupled from the queue decision.
