@@ -24,13 +24,20 @@ import java.nio.charset.StandardCharsets;
 @Order(Ordered.HIGHEST_PRECEDENCE)
 public class SwaggerInitializerFilter extends OncePerRequestFilter {
 
-    private static final String PATH = "/swagger-ui/swagger-initializer.js";
+    // Springdoc's index redirect produces a double-prefixed URL
+    // (/swagger-ui/swagger-ui/index.html), so the browser resolves
+    // ./swagger-initializer.js to the doubled path. Match either form.
+    private static final String SUFFIX = "/swagger-initializer.js";
 
     @Override
     protected void doFilterInternal(HttpServletRequest request,
                                     HttpServletResponse response,
                                     FilterChain chain) throws ServletException, IOException {
-        if (!PATH.equals(request.getRequestURI()) || !"GET".equalsIgnoreCase(request.getMethod())) {
+        String uri = request.getRequestURI();
+        if (!"GET".equalsIgnoreCase(request.getMethod())
+                || uri == null
+                || !uri.endsWith(SUFFIX)
+                || !uri.startsWith("/swagger-ui/")) {
             chain.doFilter(request, response);
             return;
         }
