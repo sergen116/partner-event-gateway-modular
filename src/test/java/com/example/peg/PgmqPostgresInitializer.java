@@ -20,7 +20,7 @@ public class PgmqPostgresInitializer
 
     static {
         POSTGRES = new PostgreSQLContainer<>(
-                DockerImageName.parse("ghcr.io/tembo-io/pg17-pgmq:latest")
+                DockerImageName.parse("quay.io/tembo/pg17-pgmq:latest")
                         .asCompatibleSubstituteFor("postgres"))
                 .withDatabaseName("events")
                 .withUsername("postgres")

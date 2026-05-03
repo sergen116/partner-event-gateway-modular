@@ -49,11 +49,12 @@ class EventRepositoryTest {
     @Test
     void insertIfAbsent_writesAuditOnFirstInsert() throws Exception {
         UUID eventId = UUID.randomUUID();
-        EventRecord existing = recordFor(eventId);
-        when(jdbc.update(anyString(), any(), any(), any(), any(), any())).thenReturn(1);
-        // findById call after insert
+        EventRecord inserted = recordFor(eventId);
+        // Pre-insert findById misses; INSERT ... RETURNING * gives back the new row.
         when(jdbc.queryForObject(anyString(), any(RowMapper.class), eq("p"), eq(eventId)))
-                .thenReturn(existing);
+                .thenThrow(new EmptyResultDataAccessException(1));
+        when(jdbc.query(anyString(), any(RowMapper.class), any(), any(), any(), any(), any()))
+                .thenReturn(java.util.List.of(inserted));
 
         EventRepository.InsertResult result = repo.insertIfAbsent(
                 "p", eventId, EventType.ORDER_CREATED, "ORD-1",
@@ -67,7 +68,7 @@ class EventRepositoryTest {
     void insertIfAbsent_skipsAudit_whenAlreadyPresent() throws Exception {
         UUID eventId = UUID.randomUUID();
         EventRecord existing = recordFor(eventId);
-        when(jdbc.update(anyString(), any(), any(), any(), any(), any())).thenReturn(0);
+        // Pre-insert findById hits → method returns immediately, INSERT never runs.
         when(jdbc.queryForObject(anyString(), any(RowMapper.class), eq("p"), eq(eventId)))
                 .thenReturn(existing);
 
@@ -80,11 +81,15 @@ class EventRepositoryTest {
     }
 
     @Test
-    void insertIfAbsent_throws_whenRowMissingAfterInsert() {
+    void insertIfAbsent_throws_whenRowMissingAfterInsertConflict() {
         UUID eventId = UUID.randomUUID();
-        when(jdbc.update(anyString(), any(), any(), any(), any(), any())).thenReturn(1);
+        // Pre-insert findById misses; INSERT ... RETURNING * returns no rows
+        // (same-microsecond conflict), post-conflict findById also misses —
+        // surface as IllegalStateException.
         when(jdbc.queryForObject(anyString(), any(RowMapper.class), eq("p"), eq(eventId)))
                 .thenThrow(new EmptyResultDataAccessException(1));
+        when(jdbc.query(anyString(), any(RowMapper.class), any(), any(), any(), any(), any()))
+                .thenReturn(java.util.List.of());
 
         assertThatThrownBy(() -> repo.insertIfAbsent(
                 "p", eventId, EventType.ORDER_CREATED, null,

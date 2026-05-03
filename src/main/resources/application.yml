@@ -131,10 +131,16 @@ resilience4j:
         max-attempts: 3
         wait-duration: 200ms
         exponential-backoff-multiplier: 2
+        # Default order is Retry outer, CircuitBreaker inner. The CB fallback wraps
+        # each failed attempt's HttpServerErrorException into a DownstreamCallException
+        # before Retry sees it, so DownstreamCallException must also be retryable —
+        # otherwise the first wrapped exception terminates the retry loop and the
+        # CB sliding window only sees one failure per outer call.
         retry-exceptions:
           - org.springframework.web.client.ResourceAccessException
           - org.springframework.web.client.HttpServerErrorException
           - java.io.IOException
+          - com.example.peg.delivery.DownstreamCallService$DownstreamCallException
         ignore-exceptions:
           # 4xx is a caller bug, not transient — don't feed the breaker.
           - org.springframework.web.client.HttpClientErrorException

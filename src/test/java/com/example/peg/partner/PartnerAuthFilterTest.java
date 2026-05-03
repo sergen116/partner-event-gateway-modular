@@ -1,7 +1,8 @@
 package com.example.peg.partner;
 
 import com.example.peg.platform.SecurityProperties;
-import com.example.peg.shared.ApiException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import jakarta.servlet.FilterChain;
@@ -10,15 +11,15 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.mockito.ArgumentCaptor;
 
 import java.io.ByteArrayInputStream;
+import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -32,6 +33,7 @@ class PartnerAuthFilterTest {
     private HmacVerifier verifier;
     private SecurityProperties props;
     private Cache<String, Optional<Partner>> cache;
+    private ObjectMapper objectMapper;
     private PartnerAuthFilter filter;
 
     @BeforeEach
@@ -40,7 +42,14 @@ class PartnerAuthFilterTest {
         verifier = mock(HmacVerifier.class);
         props = new SecurityProperties();
         cache = Caffeine.newBuilder().maximumSize(100).build();
-        filter = new PartnerAuthFilter(partners, verifier, props, cache);
+        objectMapper = new ObjectMapper().registerModule(new JavaTimeModule());
+        filter = new PartnerAuthFilter(partners, verifier, props, cache, objectMapper);
+    }
+
+    private static HttpServletResponse mockResponse() throws Exception {
+        HttpServletResponse resp = mock(HttpServletResponse.class);
+        when(resp.getWriter()).thenReturn(new PrintWriter(new StringWriter()));
+        return resp;
     }
 
     @Test
@@ -86,41 +95,42 @@ class PartnerAuthFilterTest {
     }
 
     @Test
-    void doFilter_throwsUnauthorized_whenHeadersMissing() throws Exception {
+    void doFilter_returnsUnauthorized_whenHeadersMissing() throws Exception {
         HttpServletRequest req = mock(HttpServletRequest.class);
-        HttpServletResponse resp = mock(HttpServletResponse.class);
+        HttpServletResponse resp = mockResponse();
         FilterChain chain = mock(FilterChain.class);
 
         when(req.getRequestURI()).thenReturn("/api/v1/events");
         when(req.getHeader("X-Partner-Id")).thenReturn(null);
 
-        assertThatThrownBy(() -> filter.doFilter(req, resp, chain))
-                .isInstanceOf(ApiException.class)
-                .hasMessageContaining("missing authentication headers");
+        filter.doFilter(req, resp, chain);
+
+        verify(resp).setStatus(401);
         verify(chain, never()).doFilter(any(), any());
     }
 
     @Test
-    void doFilter_throwsUnauthorized_whenPartnerNotFound() throws Exception {
+    void doFilter_returnsUnauthorized_whenPartnerNotFound() throws Exception {
         HttpServletRequest req = stubRequest("partner-x", "ts", "sig", "{}");
+        HttpServletResponse resp = mockResponse();
         when(partners.findById("partner-x")).thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> filter.doFilter(req, mock(HttpServletResponse.class), mock(FilterChain.class)))
-                .isInstanceOf(ApiException.class)
-                .hasMessageContaining("unknown partner");
+        filter.doFilter(req, resp, mock(FilterChain.class));
+
+        verify(resp).setStatus(401);
     }
 
     @Test
-    void doFilter_throwsUnauthorized_whenSignatureFailsTwice() throws Exception {
+    void doFilter_returnsUnauthorized_whenSignatureFailsTwice() throws Exception {
         Partner partner = new Partner("p", "hash", null, null, true);
         HttpServletRequest req = stubRequest("p", "ts", "sig", "{}");
+        HttpServletResponse resp = mockResponse();
         when(partners.findById("p")).thenReturn(Optional.of(partner));
         when(verifier.verify(any(), any(), any(), any(), any(), any())).thenReturn(false);
 
-        assertThatThrownBy(() -> filter.doFilter(req, mock(HttpServletResponse.class), mock(FilterChain.class)))
-                .isInstanceOf(ApiException.class)
-                .hasMessageContaining("signature verification failed");
+        filter.doFilter(req, resp, mock(FilterChain.class));
 
+        verify(resp).setStatus(401);
         // Looked up twice: cache miss + invalidation/refresh
         verify(partners, times(2)).findById("p");
     }
@@ -166,18 +176,19 @@ class PartnerAuthFilterTest {
     }
 
     @Test
-    void doFilter_throwsUnauthorized_whenPartnerNotFoundOnRefresh() throws Exception {
+    void doFilter_returnsUnauthorized_whenPartnerNotFoundOnRefresh() throws Exception {
         Partner stale = new Partner("p", "old", null, null, true);
         cache.put("p", Optional.of(stale));
 
         HttpServletRequest req = stubRequest("p", "ts", "sig", "{}");
+        HttpServletResponse resp = mockResponse();
         // First call returns false → invalidate cache → repository finds nothing
         when(verifier.verify(any(), any(), any(), any(), any(), any())).thenReturn(false);
         when(partners.findById("p")).thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> filter.doFilter(req, mock(HttpServletResponse.class), mock(FilterChain.class)))
-                .isInstanceOf(ApiException.class)
-                .hasMessageContaining("unknown partner");
+        filter.doFilter(req, resp, mock(FilterChain.class));
+
+        verify(resp).setStatus(401);
     }
 
     private static HttpServletRequest stubRequest(String partnerId, String ts, String sig, String body) throws Exception {

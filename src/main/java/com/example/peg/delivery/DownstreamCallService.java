@@ -7,14 +7,13 @@ import io.github.resilience4j.retry.annotation.Retry;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestClient;
-
-import java.util.Map;
 
 /**
  * Single seam between event handlers and the (future) downstream business
- * systems. Today the call is a stub — it POSTs a small notification to a
- * configurable base URL — but the resilience scaffolding is real:
+ * systems. Today the call is mocked in-process — it logs the notification and
+ * sleeps briefly to simulate latency — but the resilience scaffolding is real:
  *
  * <ul>
  *   <li>{@code @Retry} smooths over fast transient failures
@@ -48,16 +47,13 @@ public class DownstreamCallService {
     @CircuitBreaker(name = INSTANCE, fallbackMethod = "onFailure")
     @Retry(name = INSTANCE)
     public void notify(PartnerEventMessage msg) {
-        downstreamRestClient.post()
-                .uri("/notifications")
-                .body(Map.of(
-                        "eventId",     msg.eventId().toString(),
-                        "partnerId",   msg.partnerId(),
-                        "eventType",   msg.eventType().name(),
-                        "businessRef", msg.businessRef()
-                ))
-                .retrieve()
-                .toBodilessEntity();
+        log.info("downstream notify (mock) partner={} eventId={} eventType={} businessRef={}",
+                msg.partnerId(), msg.eventId(), msg.eventType(), msg.businessRef());
+        try {
+            Thread.sleep(5);
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     /**
@@ -68,6 +64,15 @@ public class DownstreamCallService {
      */
     @SuppressWarnings("unused")
     private void onFailure(PartnerEventMessage msg, Throwable t) {
+        // 4xx is a caller bug — re-throw the original so Retry's ignore-exceptions
+        // (HttpClientErrorException) suppresses retries. Wrapping it in
+        // DownstreamCallException would defeat that and cause noisy retries on a
+        // permanent failure.
+        if (t instanceof HttpClientErrorException httpClientErr) {
+            log.warn("downstream notify rejected partner={} eventId={} status={}",
+                    msg.partnerId(), msg.eventId(), httpClientErr.getStatusCode());
+            throw httpClientErr;
+        }
         if (t instanceof CallNotPermittedException) {
             log.warn("circuit open, skipping downstream notify partner={} eventId={}",
                     msg.partnerId(), msg.eventId());

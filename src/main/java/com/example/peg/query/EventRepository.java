@@ -75,20 +75,32 @@ public class EventRepository {
     public InsertResult insertIfAbsent(String partnerId, UUID eventId, EventType type,
                                        String businessRef, JsonNode payload,
                                        String actor) {
-        int rows = jdbc.update(
+        // The unique constraint on `events` must include `created_at` (partition
+        // key requirement on a partitioned table), so ON CONFLICT can't deduplicate
+        // by (partner_id, event_id) alone. Look up first; treat ON CONFLICT as the
+        // race-condition backstop for concurrent inserts within the same partition.
+        Optional<EventRecord> existing = findById(partnerId, eventId);
+        if (existing.isPresent()) {
+            return new InsertResult(existing.get(), false);
+        }
+
+        List<EventRecord> inserted = jdbc.query(
                 "INSERT INTO events (partner_id, event_id, event_type, business_ref, payload, status) " +
                 "VALUES (?, ?, ?, ?, ?::jsonb, 'RECEIVED') " +
-                "ON CONFLICT (partner_id, event_id, created_at) DO NOTHING",
-                partnerId, eventId, type.name(), businessRef, writeJson(payload));
+                "ON CONFLICT (partner_id, event_id, created_at) DO NOTHING " +
+                "RETURNING *",
+                rowMapper, partnerId, eventId, type.name(), businessRef, writeJson(payload));
 
-        boolean wasInserted = rows == 1;
-        EventRecord row = findById(partnerId, eventId)
-                .orElseThrow(() -> new IllegalStateException("event missing after insert"));
-
-        if (wasInserted) {
+        if (!inserted.isEmpty()) {
             audit.transition(partnerId, eventId, null, EventStatus.RECEIVED, actor, null);
+            return new InsertResult(inserted.getFirst(), true);
         }
-        return new InsertResult(row, wasInserted);
+
+        // Race within the same partition+microsecond: another tx inserted between
+        // our findById and INSERT. Look up the winner.
+        EventRecord row = findById(partnerId, eventId)
+                .orElseThrow(() -> new IllegalStateException("event missing after insert conflict"));
+        return new InsertResult(row, false);
     }
 
     /** Lookup by partner+event_id. Scans partitioned unique index. */

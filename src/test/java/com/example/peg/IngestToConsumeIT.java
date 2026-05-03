@@ -55,10 +55,9 @@ class IngestToConsumeIT {
     @Autowired HmacVerifier verifier;
     @Autowired SecurityProperties securityProps;
 
-    // The real DownstreamCallService POSTs to a configurable downstream URL;
-    // this test pipeline is about ingest→consume mechanics, so we mock the
-    // outbound notifier to a no-op. Resilience4j behavior is exercised in
-    // DownstreamCallServiceIT.
+    // DownstreamCallService is an in-process mock today, but we still @MockBean
+    // it here so this test focuses purely on ingest→consume mechanics without
+    // the simulated latency/log noise from the real notify() body.
     @MockBean DownstreamCallService downstreamCallService;
 
     private final RestTemplate http = new RestTemplate();

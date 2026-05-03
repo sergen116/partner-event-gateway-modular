@@ -4,9 +4,11 @@ import com.example.peg.PgmqPostgresInitializer;
 import com.example.peg.partner.HmacVerifier;
 import com.example.peg.platform.SecurityProperties;
 import com.example.peg.shared.EventStatus;
+import com.example.peg.shared.EventType;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.github.tomakehurst.wiremock.junit5.WireMockExtension;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -17,6 +19,7 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.ContextConfiguration;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
@@ -44,6 +47,13 @@ import static org.awaitility.Awaitility.await;
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @ContextConfiguration(initializers = PgmqPostgresInitializer.class)
+// Prior tests (IngestToConsumeIT, PartnerEventsControllerIT, etc.) cache Spring
+// contexts whose @MockBean DownstreamCallService is a no-op. Their workers stay
+// scheduled against the shared pgmq + Postgres and race this test for the message,
+// silently "processing" it as success. Evict all cached contexts before this class
+// runs so only this test's worker (with the real WireMock-backed downstream) sees
+// the message.
+@DirtiesContext(classMode = DirtiesContext.ClassMode.BEFORE_CLASS)
 class DeadLetterQueueIT {
 
     private static final String PARTNER_ID = "partner-acme";
@@ -68,6 +78,24 @@ class DeadLetterQueueIT {
     @Autowired SecurityProperties props;
 
     private final RestTemplate http = new RestTemplate();
+
+    @BeforeEach
+    void cleanState() {
+        // OutboxPollerIT leaves a bogus-queue outbox row behind that the
+        // OutboxPoller keeps retrying forever, drowning the shared scheduler
+        // and starving the workers in this test. Wipe shared tables and drain
+        // queues so this test runs against an empty pipeline.
+        jdbc.update("DELETE FROM event_outbox");
+        jdbc.update("DELETE FROM events");
+        jdbc.update("DELETE FROM event_audit_log");
+        for (EventType t : EventType.values()) {
+            try {
+                jdbc.update("SELECT pgmq.purge_queue(?)", t.queueName());
+            } catch (Exception ignored) {
+                // Queue may not exist yet on first run.
+            }
+        }
+    }
 
     @Test
     void persistentDownstreamFailure_archivesToDlq_andMarksFailed() throws Exception {
