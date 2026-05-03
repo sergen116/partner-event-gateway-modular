@@ -69,7 +69,7 @@ management:
 
 springdoc:
   swagger-ui:
-    path: /swagger-ui.html
+    path: /swagger-ui/index.html
   api-docs:
     path: /v3/api-docs
 

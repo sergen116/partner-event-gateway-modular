@@ -366,7 +366,7 @@
           "name": "Swagger UI",
           "request": {
             "method": "GET",
-            "url": { "raw": "{{baseUrl}}/swagger-ui.html", "host": ["{{baseUrl}}"], "path": ["swagger-ui.html"] }
+            "url": { "raw": "{{baseUrl}}/swagger-ui/index.html", "host": ["{{baseUrl}}"], "path": ["swagger-ui.html"] }
           }
         }
       ]

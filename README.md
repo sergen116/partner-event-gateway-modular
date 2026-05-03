@@ -35,7 +35,7 @@ The app exposes:
 |-----|---------|
 | `http://localhost:8080/api/v1/events` | Partner ingest + query (HMAC required) |
 | `http://localhost:8080/api/v1/internal/events` | Cross-partner query (no auth, per case spec) |
-| `http://localhost:8080/swagger-ui.html` | API documentation |
+| `http://localhost:8080/swagger-ui/index.html` | API documentation |
 | `http://localhost:8080/actuator/health` | Liveness/readiness |
 | `http://localhost:8080/actuator/prometheus` | Metrics |
 
