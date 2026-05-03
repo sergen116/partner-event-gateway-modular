@@ -36,10 +36,13 @@ management:
   endpoints:
     web:
       exposure:
-        include: health, info, prometheus, metrics
+        include: health, info, prometheus, metrics, circuitbreakers, retries
   endpoint:
     health:
       show-details: always
+  health:
+    circuitbreakers:
+      enabled: true
   metrics:
     tags:
       application: partner-event-gateway
@@ -77,6 +80,45 @@ app:
       events_return_requested: 4
       events_address_updated: 2
       events_order_cancelled: 4
+
+  # Stub downstream system that EventProcessor handlers notify. Override per env.
+  downstream:
+    base-url: ${DOWNSTREAM_BASE_URL:http://localhost:9999}
+    connect-timeout: 1s
+    read-timeout: 2s
+
+# Resilience4j: applied to DownstreamCallService.notify() via annotations.
+# Retry budget (max-attempts × wait × multiplier) must stay << pgmq
+# visibility-timeout-seconds (30s) minus the 5s safety buffer enforced in
+# PgmqWorker.processBatch.
+resilience4j:
+  circuitbreaker:
+    instances:
+      downstream:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 20
+        minimum-number-of-calls: 10
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 10s
+        permitted-number-of-calls-in-half-open-state: 3
+        automatic-transition-from-open-to-half-open-enabled: true
+        register-health-indicator: true
+        ignore-exceptions:
+          # Caller bug — shouldn't push the breaker toward OPEN.
+          - org.springframework.web.client.HttpClientErrorException
+  retry:
+    instances:
+      downstream:
+        max-attempts: 3
+        wait-duration: 200ms
+        exponential-backoff-multiplier: 2
+        retry-exceptions:
+          - org.springframework.web.client.ResourceAccessException
+          - org.springframework.web.client.HttpServerErrorException
+          - java.io.IOException
+        ignore-exceptions:
+          # 4xx is a caller bug, not transient — don't feed the breaker.
+          - org.springframework.web.client.HttpClientErrorException
 
 logging:
   level:

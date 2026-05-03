@@ -23,6 +23,7 @@ import org.springframework.transaction.annotation.Transactional;
 public class EventProcessor {
 
     private final EventRepository repository;
+    private final DownstreamCallService downstreamCallService;
 
     @Transactional
     public void process(PartnerEventMessage msg, String actor) {
@@ -43,26 +44,33 @@ public class EventProcessor {
         repository.markProcessed(msg.partnerId(), msg.eventId(), actor);
     }
 
-    // The real implementations are out of scope per the case spec.
-    // They would call inventory services, fraud checks, logistics partners, etc.
+    // Per-type handlers route through DownstreamCallService, which owns the
+    // Resilience4j circuit-breaker + retry around the outbound call. The
+    // real downstream integrations (inventory, fraud, logistics) plug in
+    // by extending DownstreamCallService — call sites here stay unchanged.
 
     private void handleOrderCreated(PartnerEventMessage msg) {
+        downstreamCallService.notify(msg);
         log.debug("processed OrderCreated for {}", msg.businessRef());
     }
 
     private void handleShipmentUpdated(PartnerEventMessage msg) {
+        downstreamCallService.notify(msg);
         log.debug("processed ShipmentStatusUpdated for {}", msg.businessRef());
     }
 
     private void handleReturnRequested(PartnerEventMessage msg) {
+        downstreamCallService.notify(msg);
         log.debug("processed ReturnRequested for {}", msg.businessRef());
     }
 
     private void handleAddressUpdated(PartnerEventMessage msg) {
+        downstreamCallService.notify(msg);
         log.debug("processed DeliveryAddressUpdated for {}", msg.businessRef());
     }
 
     private void handleOrderCancelled(PartnerEventMessage msg) {
+        downstreamCallService.notify(msg);
         log.debug("processed OrderCancelled for {}", msg.businessRef());
     }
 }

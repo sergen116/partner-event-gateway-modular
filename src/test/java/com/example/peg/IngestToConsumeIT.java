@@ -1,5 +1,6 @@
 package com.example.peg;
 
+import com.example.peg.delivery.DownstreamCallService;
 import com.example.peg.ingest.SubmitEventResponse;
 import com.example.peg.platform.SecurityProperties;
 import com.example.peg.shared.EventStatus;
@@ -10,6 +11,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
@@ -52,6 +54,12 @@ class IngestToConsumeIT {
     @Autowired JdbcTemplate jdbc;
     @Autowired HmacVerifier verifier;
     @Autowired SecurityProperties securityProps;
+
+    // The real DownstreamCallService POSTs to a configurable downstream URL;
+    // this test pipeline is about ingest→consume mechanics, so we mock the
+    // outbound notifier to a no-op. Resilience4j behavior is exercised in
+    // DownstreamCallServiceIT.
+    @MockBean DownstreamCallService downstreamCallService;
 
     private final RestTemplate http = new RestTemplate();
 

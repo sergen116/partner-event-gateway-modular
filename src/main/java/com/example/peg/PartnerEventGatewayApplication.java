@@ -1,6 +1,7 @@
 package com.example.peg;
 
 import com.example.peg.platform.ConsumerProperties;
+import com.example.peg.platform.DownstreamProperties;
 import com.example.peg.platform.RuntimeProperties;
 import com.example.peg.platform.SecurityProperties;
 import org.springframework.boot.SpringApplication;
@@ -10,6 +11,7 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 @SpringBootApplication
 @EnableConfigurationProperties({
         ConsumerProperties.class,
+        DownstreamProperties.class,
         RuntimeProperties.class,
         SecurityProperties.class
 })
