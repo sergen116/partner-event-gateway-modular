@@ -360,7 +360,7 @@ breaker `OPEN`, `hikaricp_connections_pending > 0` sustained, 5xx rate > 0.
 W3C propagation (`traceparent`/`tracestate`). **Always-on context, opt-in
 export:** spans are always created and `trace_id`/`span_id` always flow into
 MDC, but the OTLP exporter is only registered when
-`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is set — so logs stay correlatable
+`MANAGEMENT_OTLP_TRACING_ENDPOINT` is set — so logs stay correlatable
 locally with no collector running, and there's no `Connection refused` noise.
 Sampling: `management.tracing.sampling.probability` (env `TRACING_SAMPLING`,
 default `0.1`).
@@ -375,7 +375,7 @@ Local visualization (optional):
 
 ```bash
 docker run --rm -p 16686:16686 -p 4318:4318 jaegertracing/all-in-one:latest
-OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:4318/v1/traces \
+MANAGEMENT_OTLP_TRACING_ENDPOINT=http://localhost:4318/v1/traces \
 TRACING_SAMPLING=1.0 mvn spring-boot:run
 ```
 

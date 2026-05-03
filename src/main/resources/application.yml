@@ -55,19 +55,17 @@ management:
       role: ${APP_RUNTIME_MODE:CONSUMER_ALL}
   # Tracing: spans are always created and trace_id / span_id always flow
   # into MDC, regardless of whether they're exported. The OTLP exporter is
-  # only registered when an endpoint is set — leave it unset locally to
-  # avoid connect-refused noise; in deployed envs set
-  #   OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://<collector>:4318/v1/traces
-  # to enable W3C span export.
+  # only registered when management.otlp.tracing.endpoint is set — leave it
+  # unset locally to avoid connect-refused noise; in deployed envs set
+  #   MANAGEMENT_OTLP_TRACING_ENDPOINT=http://<collector>:4318/v1/traces
+  # to enable W3C span export. (Don't set it from YAML — any value, including
+  # an empty string or unevaluated SpEL, satisfies @ConditionalOnProperty and
+  # triggers URL validation against the literal string.)
   tracing:
     sampling:
       probability: ${TRACING_SAMPLING:0.1}
     propagation:
       type: w3c
-  otlp:
-    tracing:
-      endpoint: ${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:#{null}}
-      transport: http
 
 springdoc:
   swagger-ui:
