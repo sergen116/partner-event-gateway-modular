@@ -25,11 +25,13 @@ sequenceDiagram
         Sem-->>VT: permit
         VT->>EP: process(message_1)
         activate EP
+        Note over EP,DB: tx 1 (claim)
         EP->>DB: UPDATE events SET status='PROCESSING'<br/>WHERE status IN ('PENDING','PROCESSING')
         DB-->>EP: rows updated
         alt rows == 1 (claimed)
-            EP->>EP: dispatch by event_type
-            Note over EP: handler runs<br/>(may call downstream services)
+            Note over EP: tx 1 commits — connection released
+            EP->>EP: dispatch by event_type<br/>(handler + downstream call run<br/>OUTSIDE any DB transaction)
+            Note over EP,DB: tx 2 (finalize)
             EP->>DB: UPDATE events SET status='PROCESSED', processed_at=NOW()
         else rows == 0 (already terminal)
             Note over EP: silently skip<br/>(idempotent — already handled)
@@ -69,9 +71,9 @@ sequenceDiagram
     participant PGMQ as pgmq queue
 
     W->>EP: process(msg, read_ct=2)
-    EP->>DB: UPDATE status='PROCESSING'
-    EP->>EP: handler throws RuntimeException
-    Note over EP,DB: @Transactional rolls back<br/>status reverts to PENDING
+    EP->>DB: tx 1: UPDATE status='PROCESSING' → commit
+    EP->>EP: handler throws RuntimeException<br/>(outside any DB transaction)
+    Note over EP,DB: tx 2 (finalize) never starts<br/>row stays in PROCESSING
 
     EP-->>W: throws
     W->>W: log, increment failure counter
@@ -100,18 +102,26 @@ calls is safer than risking double-delete or partial state.
 `tryMarkProcessing` updates `WHERE status IN ('PENDING', 'PROCESSING')`. Why allow
 `PROCESSING → PROCESSING`?
 
-A worker that crashes after `UPDATE status='PROCESSING'` but before completion leaves
-the row in PROCESSING. The transaction has rolled back any *handler* changes, but the
-status update was its own UPDATE — wait, no, actually `process` is `@Transactional`, so
-the status update would also roll back to PENDING.
+`EventProcessor.process` runs in two short transactions bracketing the downstream
+call:
 
-But there's still a path where PROCESSING persists: if the JVM SIGKILLs after the
-transaction commits but before the worker calls `pgmq.delete`. In that window, the
-events row is PROCESSED (or FAILED) on disk but pgmq doesn't know. On next redelivery,
-`tryMarkProcessing` returns 0 rows updated (status is PROCESSED), and the worker
-silently skips and deletes the message. So actually, allowing `PROCESSING → PROCESSING`
-is mostly defensive — handles the edge case where a crash leaves PROCESSING in DB
-without rolling back.
+1. **Tx 1 (claim)** — `UPDATE status='PROCESSING'`, commit.
+2. **(no tx)** — handler runs, calls downstream.
+3. **Tx 2 (finalize)** — `UPDATE status='PROCESSED'`, commit.
+
+If anything between (1) and (3) fails — handler exception, downstream timeout,
+worker SIGKILL, finalize failure — the row is committed in PROCESSING and stays
+that way. pgmq's visibility timeout expires, the message is redelivered, and
+the next worker's `tryMarkProcessing` finds the row in PROCESSING. Allowing
+`PROCESSING → PROCESSING` is what lets that next worker take over cleanly
+instead of returning false and dropping the redelivery.
+
+There's also the post-`PROCESSED` race to keep in mind: if the JVM SIGKILLs
+after Tx 2 commits but before `pgmq.delete`, the events row is PROCESSED on
+disk but pgmq doesn't know. On redelivery, `tryMarkProcessing` returns 0 rows
+updated (status is PROCESSED, not in the WHERE clause), and the worker silently
+skips and deletes the message. The status filter handles both cases with one
+predicate.
 
 ## DLQ inspection
 

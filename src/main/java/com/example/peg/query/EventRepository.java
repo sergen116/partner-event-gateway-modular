@@ -166,8 +166,15 @@ public class EventRepository {
      * Atomic claim PENDING/PROCESSING → PROCESSING. Returns true if this caller
      * transitioned the row.
      *
-     * <p>{@code PROCESSING → PROCESSING} is allowed for redelivery after a
-     * worker crash (visibility timeout expired, prior tx rolled back).
+     * <p>{@code PROCESSING → PROCESSING} is allowed for redelivery after the
+     * prior attempt failed to reach PROCESSED. Two valid recovery shapes:
+     * <ul>
+     *   <li>The worker's claim transaction committed but the worker died (or
+     *       its downstream call / finalize transaction failed) before
+     *       PROCESSED — pgmq's VT expires and a new worker reclaims.</li>
+     *   <li>An older single-transaction shape that rolled the claim back on
+     *       failure — covered for backward compatibility and replay scenarios.</li>
+     * </ul>
      */
     public boolean tryMarkProcessing(String partnerId, UUID eventId, String actor) {
         int rows = jdbc.update(

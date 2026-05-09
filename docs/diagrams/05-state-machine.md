@@ -11,8 +11,7 @@ stateDiagram-v2
     RECEIVED --> PENDING : OutboxPoller forwards to pgmq
     PENDING --> PROCESSING : worker tryMarkProcessing
     PROCESSING --> PROCESSED : handler succeeds
-    PROCESSING --> PENDING : handler throws → @Transactional rollback
-    PROCESSING --> PROCESSING : redelivery after worker SIGKILL
+    PROCESSING --> PROCESSING : handler throws or worker dies → pgmq VT redelivers, next worker reclaims
     PROCESSING --> FAILED : worker exhausts maxAttempts → DLQ
 
     PROCESSED --> [*]
@@ -64,7 +63,7 @@ partner's view, every retry returns whatever state the original event has reache
 | `RECEIVED → PENDING` | ~250ms (one OutboxPoller tick) |
 | `PENDING → PROCESSING` | ~500ms (one worker poll) |
 | `PROCESSING → PROCESSED` | depends on handler — typically <100ms for trivial events, seconds for ones calling downstream services |
-| `PROCESSING → PENDING` (retry) | up to VT (30s) per attempt |
+| `PROCESSING → PROCESSING` (redelivery) | up to VT (30s) per attempt |
 | `PROCESSING → FAILED` | up to `maxAttempts × VT` = 150s with default config |
 
 End-to-end p50 from API ack to PROCESSED: under 1 second under normal load.
@@ -72,18 +71,20 @@ End-to-end p50 from API ack to PROCESSED: under 1 second under normal load.
 ## Every transition is audited
 
 Every state transition writes a row to `event_audit_log` via `AuditLogger.transition`,
-inside the same transaction as the operational UPDATE. This means:
+inside the same transaction as the operational UPDATE — each transition is its
+own short transaction (the claim and the finalize are not bundled together).
+This means:
 
 - A successful PROCESSED event has 4 audit rows: `null→RECEIVED`,
   `RECEIVED→PENDING`, `PENDING→PROCESSING`, `PROCESSING→PROCESSED`.
 - A FAILED event has 4 audit rows ending in `PROCESSING→FAILED`, with the
   failure reason captured in `event_audit_log.error`.
-- A redelivered event that crashes mid-processing and recovers can have
-  5+ rows (multiple `PROCESSING→PROCESSING` self-transitions).
+- A redelivered event whose downstream call failed and recovered on a later
+  attempt can have 5+ rows (one or more `PROCESSING→PROCESSING` self-transitions
+  before the eventual `PROCESSING→PROCESSED`).
 
-If the operational UPDATE rolls back (e.g., the handler throws), the audit
-write rolls back with it — the audit log never records transitions that
-didn't actually happen.
+Each operational UPDATE and its audit row commit together or roll back together,
+so the audit log never records a transition the events table doesn't reflect.
 
 The audit log retention is 24 months — twice the events table's 12-month
 retention. By the time the events row is dropped via partition retention,

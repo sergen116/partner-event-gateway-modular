@@ -102,9 +102,12 @@ which beans get instantiated.
   fans batch processing across virtual threads bounded by a Semaphore, enforces a
   batch deadline below the visibility timeout via
   `CompletableFuture.allOf().orTimeout(VT - 5s)`.
-- **`EventProcessor`** — invoked per message. Claims via `tryMarkProcessing`
-  (silent skip if already terminal), dispatches to a per-type handler, then marks
-  PROCESSED. On exception, the transaction rolls back and pgmq's VT redelivers.
+- **`EventProcessor`** — invoked per message. Two short transactions bracket the
+  downstream call: tx 1 claims via `tryMarkProcessing` (silent skip if already
+  terminal) and commits; the per-type handler runs outside any DB transaction;
+  tx 2 marks PROCESSED. On exception (handler, downstream call, or finalize),
+  the row is left committed in PROCESSING and pgmq's VT redelivers — the next
+  worker reclaims via the `PROCESSING → PROCESSING` rule on `tryMarkProcessing`.
   Final-attempt FAILED + DLQ archive is the worker's decision via
   `read_ct >= maxAttempts`.
 - **`DownstreamCallService`** — single seam between handlers and (mocked) downstream
@@ -252,8 +255,10 @@ Visualised: [`diagrams/03-ingest-sequence.md`](diagrams/03-ingest-sequence.md),
 
 - **Transactional outbox**: events insert and outbox insert commit atomically.
   Crash before pgmq.send → outbox poller picks up on next run.
-- **pgmq visibility timeout**: a worker crash mid-processing reverts state via
-  transaction rollback; pgmq redelivers after VT.
+- **pgmq visibility timeout**: a worker crash mid-processing leaves the row
+  in PROCESSING (the claim transaction has committed; the finalize one never
+  ran). pgmq redelivers after VT and the next worker reclaims via the
+  `PROCESSING → PROCESSING` rule on `tryMarkProcessing`.
 - **DLQ**: messages exceeding `maxAttempts` (default 5) move to the pgmq archive
   table and the events row is marked FAILED.
 - **Downstream resilience**: `DownstreamCallService.notify` is wrapped with
@@ -644,10 +649,12 @@ tail: a sustained outage would otherwise turn the worker pool into a retry
 generator. Together they compose — retry for blips, breaker for outages. 4xx is
 excluded from `retry-exceptions` so caller bugs fail fast.
 
-**Why the fallback rethrows.** `onFailure` logs and rethrows so the
-`EventProcessor` transaction rolls back and pgmq redelivery / DLQ keep applying
-their own outer budget. Two layers, composed not stacked: Resilience4j is fast and
-in-process; pgmq is slow, durable, and survives restarts.
+**Why the fallback rethrows.** `onFailure` logs and rethrows so the exception
+propagates out of `EventProcessor.process` (the row is left committed in
+PROCESSING by the claim transaction; the finalize transaction never runs) and
+pgmq redelivery / DLQ keep applying their own outer budget. Two layers,
+composed not stacked: Resilience4j is fast and in-process; pgmq is slow,
+durable, and survives restarts.
 
 **Trade-off:** Two retry layers can multiply attempts in the worst case; mitigated
 by the tight in-process budget (3 × 200 ms ≪ 25 s) and the 4xx exclusion. Also
