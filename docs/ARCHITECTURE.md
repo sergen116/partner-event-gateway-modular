@@ -845,3 +845,32 @@ audit log.
 or sharding requirement, splitting becomes a migration (new table, dual-write
 window, poller fan-out). Acceptable — the trigger is concrete and observable,
 and the migration is local to the delivery module.
+
+**Stage 2 evolution — split the hot type's outbox (documented, not deployed).**
+Once one event type's volume dominates the others, the single-table shape
+exhibits the standard shared-outbox failure modes — and the cure is the same
+shape as the per-type pgmq queues one layer down:
+
+1. **High lock contention.** All API pods insert into one heap and all
+   pollers `SELECT … FOR UPDATE SKIP LOCKED` against one B-tree. Contention
+   on the tail page grows with concurrency, independent of event-type mix.
+2. **Shared-table throughput bottleneck.** One heap, one B-tree, one
+   autovacuum schedule — the same per-heap ceiling that motivates queue
+   sharding in [ADR-003](#adr-003-per-event-type-queues) and the
+   [Stage 2 hot-queue split](diagrams/06-stage2-topology.md#when-one-event-type-still-saturates).
+   Per-type consumer autonomy is undermined if every producer still funnels
+   through one table.
+3. **DELETE I/O and table fragmentation.** The poller's hot path is
+   delete-on-send ([ADR-006](#adr-006-outbox-delete-on-send)). At sustained
+   high write rates this produces continuous dead-tuple churn — heap and
+   index bloat, aggressive autovacuum overhead competing with ingest I/O
+   on the same table.
+
+The fix is symmetric with the queue-side fix: split *that one* type into its
+own outbox table (`event_outbox_order_created`); leave the cool four sharing
+`event_outbox`. If the per-type heap itself saturates, apply the same
+`hash(partner_id) % N` shard key
+([§ 5 in `07-scaling-and-tradeoffs.md`](diagrams/07-scaling-and-tradeoffs.md#5-why-partner_id-is-the-right-shard-key-when-l5-is-reached))
+to the outbox table just as it applies to the pgmq queue. The full hot-queue
+outbox-split treatment lives in
+[`06-stage2-topology.md` § "When the single outbox saturates"](diagrams/06-stage2-topology.md#when-the-single-outbox-saturates-hot-queue-outbox-split).

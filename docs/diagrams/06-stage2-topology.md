@@ -127,6 +127,65 @@ single-queue. When sharding pgmq becomes operationally heavier than the alternat
 that one queue migrates to Kafka. Both options sit at the expensive end of the
 [scaling lever inventory](07-scaling-and-tradeoffs.md#3-lever-inventory--cost-ordered).
 
+## When the single outbox saturates (hot-queue outbox split)
+
+Stage 1 and the default Stage 2 share **one** `event_outbox` table — every API pod
+inserts into it, every API pod's poller drains from it
+([ADR-012](../ARCHITECTURE.md#adr-012-single-event_outbox-table-not-split-per-event-type)).
+That works because the outbox is a transient buffer: rows are deleted on successful
+`pgmq.send` ([ADR-006](../ARCHITECTURE.md#adr-006-outbox-delete-on-send)), so
+steady-state size is bounded by `poll_interval × write_rate` regardless of type mix.
+
+**The single-table shape stops working when one event type dominates.** The same
+three failure modes that motivate the per-event-type pgmq queues
+([ADR-003](../ARCHITECTURE.md#adr-003-per-event-type-queues)) reappear at the
+outbox layer once one type's volume crosses the per-heap ceiling:
+
+- **High lock contention.** Every API pod inserts into the same heap; every
+  poller across every API pod runs `SELECT … FOR UPDATE SKIP LOCKED` against the
+  same B-tree. At N pods × P partners × M event types per second, row- and
+  page-level contention on the tail of the outbox table grows with concurrency,
+  not with mix.
+- **Single-table throughput bottleneck.** The outbox is a shared resource for
+  every ingest path. One table is one heap, one B-tree, one autovacuum schedule
+  — exactly the per-heap ceiling that drives the pgmq sharding decision in the
+  section above. The autonomy that per-type pgmq queues give consumers
+  disappears one layer up if the producer side still funnels through a single
+  table.
+- **DELETE I/O and table fragmentation.** The poller's hot path is `DELETE
+  FROM event_outbox WHERE id = ?` immediately after `pgmq.send`. At sustained
+  high write rates this produces a steady stream of dead tuples — heap bloat,
+  index bloat, and aggressive autovacuum overhead that competes with the
+  ingest path for I/O on the same table.
+
+**The Stage 2 evolution (not implemented, future need).** When one event type
+saturates the shared outbox, split *that one* type into its own table:
+
+```text
+event_outbox                  ← four cool types share this
+event_outbox_order_created    ← hot type gets its own heap, B-tree, autovacuum
+```
+
+This mirrors the per-event-type pgmq topology: each `OutboxPoller` is bound to
+one table, runs its own `SKIP LOCKED` claim against its own heap, and drains
+into one pgmq queue. Result: writes for the hot type stop contending with the
+cool four; autovacuum on the hot table tunes independently; an incident on the
+hot path doesn't backpressure ingest for the other types.
+
+If even the per-type heap saturates (one event type whose own volume crosses
+the per-table ceiling), the same `hash(partner_id) % N` shard key applied to
+its pgmq queue applies to its outbox: `event_outbox_order_created_shard_0` …
+`_shard_15`, each polled independently. Symmetric with the queue-side fix.
+
+**Surgical, not blanket — same rule as queue sharding.** The single
+`event_outbox` table stays for the cool four types because splitting them
+multiplies migration surface, schema, and poller wiring without removing a
+real bottleneck. Split only the type that crosses the ceiling.
+
+This is documented as a Stage 2 evolution path, not deployed by this submission
+— same posture as the other Stage 2 levers (KEDA manifests, PgBouncer service,
+queue-side `hash(partner_id) % N` sharding).
+
 ## Stage 1 sizing for 2K TPS (peak only)
 
 Stage 1 is the single-pod `CONSUMER_ALL` shape: one JVM hosts the API, all 5

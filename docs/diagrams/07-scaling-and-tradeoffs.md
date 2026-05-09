@@ -93,7 +93,8 @@ Most teams never get past step 4. **Don't reach for #18 when #1 isn't tried.**
 | 15 | Bigger Postgres instance | L4 | **infra** |
 | 16 | Dedicated Postgres for pgmq | L4, blast-radius | **noted**, not deployed |
 | 17 | Cold-tier archive of detached partitions to S3 | storage cost | **partial** — `retention_keep_table=true` is set, so partitions detach instead of dropping; the dump-to-S3 job is not implemented |
-| 18 | Shard the hot queue by `hash(partner_id) % N` | L5 | **not wired** — surgical, only if one type saturates |
+| 17a | Split outbox table for the hot event type (`event_outbox_<type>`) | L3, L5 | **not wired** — single `event_outbox` is correct until one type dominates ([ADR-012](../ARCHITECTURE.md#adr-012-single-event_outbox-table-not-split-per-event-type)). Triggers: tail-page lock contention, autovacuum I/O competing with ingest, delete-on-send churn. See [06-stage2-topology.md § hot-queue outbox split](06-stage2-topology.md#when-the-single-outbox-saturates-hot-queue-outbox-split) |
+| 18 | Shard the hot queue by `hash(partner_id) % N` | L5 | **not wired** — surgical, only if one type saturates. Pairs with #17a: same shard key applies to the per-type outbox if its heap saturates |
 | 19 | Migrate hottest queue to Kafka | L5 | **not wired** — last resort. The outbox is the seam that keeps this swap cheap |
 | 20 | Shard the operational DB | L4 ceiling | **not wired** — only at huge scale |
 
