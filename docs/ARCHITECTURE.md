@@ -241,10 +241,12 @@ is gated by handler work and connection-pool capacity, not WAL on the queue
 table. So switching to unlogged would pay the full durability cost for an
 optimisation that doesn't unblock any documented bottleneck.
 
+### Throughput lever (`pgmq.send_batch`) if queue-write latency ever becomes the bottleneck
+
 If write latency on the queue tables ever does become the actual bottleneck,
-the durability-preserving levers are `synchronous_commit = off` per producer
-session, `pgmq.send_batch`, or replacing the polling drain with a `LISTEN/NOTIFY`-
-triggered batch — all keep the at-least-once contract intact.
+the durability-preserving lever is `pgmq.send_batch` — see
+[ADR-011](#adr-011-per-row-pgmqsend-vs-pgmqsend_batch-in-the-outbox-poller) for
+why it isn't the default today. It keeps the at-least-once contract intact.
 
 ### Processing flow
 
@@ -738,3 +740,37 @@ Postgres stays. Events, audit log, and partner credentials are OLTP workloads �
 transactional, indexed, partitioned — where Postgres is best-in-class. The broker
 swap is a delivery-layer change, not a storage one; the storage decision is
 decoupled from the queue decision.
+
+### ADR-011: Per-row `pgmq.send` vs `pgmq.send_batch` in the outbox poller
+
+**Decision:** `OutboxPoller.drain` calls `pgmq.send` once per claimed outbox row,
+inside the same transaction that deletes the outbox row and transitions the event
+to `PENDING`. It does not use `pgmq.send_batch`.
+
+**Why not `send_batch`.** `pgmq.send_batch` accepts an array of payloads for a
+*single* queue. The outbox holds rows destined for many queues (one per event
+type), so a batched poller would have to (1) group the claimed batch by
+`queue_name`, (2) maintain a per-queue buffer with its own size/flush rules, and
+(3) wire each per-queue dispatch back to the correct outbox-delete +
+event-status update. That is the Kafka-producer accumulator pattern in
+miniature, and it carries ongoing cost: every new event type means revisiting
+the grouping logic and its tests. Per-row send keeps the drain loop a flat
+`for row : rows { send; delete; markPending }` — one code path, no per-queue
+state.
+
+**Trade-off accepted.** N round-trips per batch instead of one per queue-group.
+Acceptable because the poller is not the hot path: API ack happens before the
+poller runs, the drain transaction is small, and at current sizing
+(`BATCH_SIZE=50`, `POLL_INTERVAL=250 ms`) the throughput ceiling sits well above
+documented load. If queue-write latency ever becomes the actual bottleneck,
+`pgmq.send_batch` is the durability-preserving lever called out in the
+unlogged-tables discussion above.
+
+**Why this changes under Kafka.** When pgmq is eventually replaced by Kafka
+([ADR-002](#adr-002-transactional-outbox-vs-direct-pgmqsend) anticipates this),
+the trade-off flips. The Kafka producer already buffers and batches per topic
+internally, and `producer.send(record, callback)` returns immediately — the
+relay calls `send` per outbox row and attaches the outbox-delete +
+event-status update to the callback. The application gets per-topic batching
+for free without owning any grouping logic, so the rationale that justifies
+per-row send today does not survive the broker swap.

@@ -80,7 +80,7 @@ Most teams never get past step 4. **Don't reach for #18 when #1 isn't tried.**
 | 3 | Per-queue `pgmq.read` batch size | L1 | **wired** — `app.consumer.batch-size.<queue>` (sized to ~2× concurrency) |
 | 3a | Work-conserving poll loop (busy vs idle interval) | L1, L2 | **wired** — `app.consumer.busy-poll-interval-ms` (20 ms) on full batches, `poll-interval-ms` (500 ms) when partial/empty |
 | 4 | Long-polling (`pgmq.read_with_poll`) | L2 (idle queues) | **not wired** — `PgmqWorker.readBatch` calls plain `pgmq.read`; busy interval already covers loaded queues |
-| 5 | Faster outbox poll / bigger batch | L3 | **not exposed** — `BATCH_SIZE=50`, `POLL_INTERVAL=250ms` are constants in `OutboxPoller`; would lift to `app.outbox.*` |
+| 5 | Faster outbox poll / bigger batch | L3 | **not exposed** — `BATCH_SIZE=50`, `POLL_INTERVAL=250ms` are constants in `OutboxPoller`; would lift to `app.outbox.*`. Stays per-row `pgmq.send` not `send_batch`; see [ADR-011](../ARCHITECTURE.md#adr-011-per-row-pgmqsend-vs-pgmqsend_batch-in-the-outbox-poller) |
 | 6 | Profile + optimize per-message handler | L1 | **per-handler** — case-by-case |
 | 7 | API replicas (HPA on CPU) | L3 | **partial** — `APP_RUNTIME_MODE=API` wired; HPA manifest not in repo |
 | 8 | Per-partner rate limit (token bucket → 429) | L3 | **not wired** — would slot into `PartnerAuthFilter` |
