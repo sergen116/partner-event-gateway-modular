@@ -293,6 +293,21 @@ Visualised: [`diagrams/03-ingest-sequence.md`](diagrams/03-ingest-sequence.md),
 - DB unique constraint on `(partner_id, event_id, created_at)` is per-partner per-month.
 - Two partners can reuse the same UUID without collision.
 
+**Limitation — tenant scoping is explicit, not implicit.** There is no
+`TenantContext` thread-local + Hibernate filter (or AOP interceptor) that
+auto-appends `partner_id = ?` to every query. The persistence layer is
+JdbcTemplate + raw SQL throughout because pgmq is JDBC-native (`pgmq.send`,
+`pgmq.read`, `FOR UPDATE SKIP LOCKED` — none of these are expressible
+idiomatically in JPA), and layering JPA on top for a five-table schema with no
+entity-graph traversal would only buy a hybrid JDBC + JPA stack with no upside
+(see [ADR-007](#adr-007-specifications-without-jpa)). Consequence: every
+repository method takes `partner_id` as a parameter and binds it explicitly,
+where JPA's `@FilterDef` / `@TenantId` would make it transparent. Known
+trade-off — falls out of the same JDBC choice pgmq forces on us, and the
+cross-partner surface stays small enough (one repository method per query)
+that the explicit binding is cheaper than carrying a second persistence
+stack.
+
 ### Idempotency
 
 - `(partner_id, event_id, created_at)` unique constraint blocks duplicate rows
@@ -668,9 +683,22 @@ filter is one line plus one `EventQuery` field. SQL stays one read away, which
 matters for keeping queries partition-prunable on the monthly-partitioned `events`
 table.
 
-**Trade-off:** Developers who reach for `JpaSpecificationExecutor` by reflex have
-to read the module to recognise the pattern. Mitigated by the registry being five
-lines and the design being documented here.
+**Trade-offs:**
+
+- Developers who reach for `JpaSpecificationExecutor` by reflex have to read
+  the module to recognise the pattern. Mitigated by the registry being five
+  lines and the design being documented here.
+- **Tenant scoping is explicit, not implicit.** Every repository method takes
+  `partner_id` as a parameter and binds it on the query — there is no
+  `TenantContext` thread-local + Hibernate filter (or AOP interceptor) that
+  would auto-append `partner_id = ?`. With JPA, `@FilterDef` / `@TenantId`
+  makes this seamless; with JdbcTemplate it stays explicit at every call
+  site. This is a direct consequence of the JDBC choice pgmq already forces
+  on us — adding JPA *just* for tenant filtering would mean a JDBC + JPA
+  hybrid stack on a five-table schema, which the rationale above already
+  rejects. Acceptable because the cross-partner surface is small (one method
+  per query) and every cross-partner read is a deliberate one
+  (`/api/v1/internal/**`), not an accidental leak past a missing filter.
 
 ### ADR-008: Monthly partitioning for events and audit
 

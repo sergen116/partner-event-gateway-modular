@@ -271,6 +271,17 @@ Dockerfile                             Multi-stage: build → layer-extract → 
 - **No partner self-service onboarding.** Partners are seeded via Flyway migration
   for the case study. A real platform would have an admin API to create / rotate /
   deactivate partners.
+- **Tenant scoping is explicit, not implicit.** There is no `TenantContext`
+  thread-local + Hibernate filter that would auto-inject `partner_id` into
+  every query. The persistence layer is JdbcTemplate + raw SQL because pgmq is
+  JDBC-native (`pgmq.send`, `pgmq.read`, `FOR UPDATE SKIP LOCKED`) and the
+  five-table schema has no entity-graph traversal — adding JPA on top *just*
+  for tenant filtering would mean a JDBC + JPA hybrid stack with no upside
+  (see [ADR-007](docs/ARCHITECTURE.md#adr-007-specifications-without-jpa)).
+  Consequence: every repository method takes `partner_id` as a parameter and
+  binds it manually; JPA would have made this seamless via `@FilterDef` /
+  `@TenantId`. Known trade-off — accepted as a direct consequence of the
+  no-JPA decision pgmq already forces on us.
 
 ## Time spent
 
