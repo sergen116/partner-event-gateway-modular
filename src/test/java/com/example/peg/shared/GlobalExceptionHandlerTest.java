@@ -5,8 +5,10 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 import org.springframework.core.MethodParameter;
+import org.springframework.http.HttpInputMessage;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.validation.BeanPropertyBindingResult;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 
@@ -81,6 +83,38 @@ class GlobalExceptionHandlerTest {
         assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
         assertThat(resp.getBody().code()).isEqualTo("BAD_REQUEST");
         assertThat(resp.getBody().message()).isEqualTo("oops");
+    }
+
+    @Test
+    void handleUnreadable_unwrapsIllegalArgumentCause_andReturns400() {
+        // Mirrors what Jackson does when @JsonCreator throws: wrap IllegalArgumentException
+        // in a JsonMappingException-like cause, then Spring wraps that in HttpMessageNotReadableException.
+        IllegalArgumentException root = new IllegalArgumentException("unknown event type: NotARealType");
+        RuntimeException jacksonWrapper = new RuntimeException("instantiation failed", root);
+        HttpInputMessage inputMessage = Mockito.mock(HttpInputMessage.class);
+        HttpMessageNotReadableException ex =
+                new HttpMessageNotReadableException("JSON parse error", jacksonWrapper, inputMessage);
+
+        ResponseEntity<ErrorResponse> resp = handler.handleUnreadable(ex, request);
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(resp.getBody()).isNotNull();
+        assertThat(resp.getBody().code()).isEqualTo("INVALID_REQUEST_BODY");
+        assertThat(resp.getBody().message()).isEqualTo("unknown event type: NotARealType");
+    }
+
+    @Test
+    void handleUnreadable_fallsBackToGenericMessage_whenNoIllegalArgInChain() {
+        HttpInputMessage inputMessage = Mockito.mock(HttpInputMessage.class);
+        HttpMessageNotReadableException ex =
+                new HttpMessageNotReadableException("JSON parse error",
+                        new RuntimeException("trailing comma at line 3"), inputMessage);
+
+        ResponseEntity<ErrorResponse> resp = handler.handleUnreadable(ex, request);
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(resp.getBody().code()).isEqualTo("INVALID_REQUEST_BODY");
+        assertThat(resp.getBody().message()).isEqualTo("malformed request body");
     }
 
     @Test

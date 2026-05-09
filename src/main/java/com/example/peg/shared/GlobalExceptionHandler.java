@@ -5,6 +5,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
@@ -43,6 +44,23 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ErrorResponse> handleIllegalArg(IllegalArgumentException ex) {
         return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(
                 new ErrorResponse("BAD_REQUEST", ex.getMessage(), Instant.now()));
+    }
+
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    public ResponseEntity<ErrorResponse> handleUnreadable(HttpMessageNotReadableException ex,
+                                                          HttpServletRequest req) {
+        String message = "malformed request body";
+        Throwable cause = ex.getCause();
+        while (cause != null) {
+            if (cause instanceof IllegalArgumentException && cause.getMessage() != null) {
+                message = cause.getMessage();
+                break;
+            }
+            cause = cause.getCause();
+        }
+        log.info("bad request body path={} reason={}", req.getRequestURI(), message);
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(
+                new ErrorResponse("INVALID_REQUEST_BODY", message, Instant.now()));
     }
 
     @ExceptionHandler(Exception.class)

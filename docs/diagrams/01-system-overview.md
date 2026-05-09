@@ -17,6 +17,7 @@ flowchart LR
 
         subgraph API_ROLE["API role"]
             HMAC[partner: PartnerAuthFilter]
+            PCACHE[/"partner: Caffeine cache<br/>TTL 60s · max 10k<br/>hit_ratio + size gauges"/]
             CTRL_INGEST[ingest: PartnerEventsController]
             INGEST_SVC[ingest: EventIngestService]
             CTRL_INTERNAL[query: InternalEventsController]
@@ -58,7 +59,10 @@ flowchart LR
     OPS -- "GET /internal" --> CTRL_INTERNAL
 
     HMAC --> CTRL_INGEST
-    HMAC -. read .-> PARTNERS
+    HMAC -- "lookup(partnerId)" --> PCACHE
+    PCACHE -. "miss: load" .-> PARTNERS
+    HMAC -. "invalidate on<br/>verify-fail (rotation)" .-> PCACHE
+    PCACHE -- "hit_ratio, size" --> PROM
 
     CTRL_INGEST --> INGEST_SVC
     INGEST_SVC --> EVT_REPO
@@ -93,6 +97,16 @@ flowchart LR
     CTRL_INTERNAL -- "Specifications query" --> EVT_REPO
     QDX -- "pgmq.metrics()" --> Q1
     QDX --> PROM
+
+    classDef controller fill:#1f77b4,stroke:#0b3d66,color:#ffffff;
+    classDef worker fill:#2ca02c,stroke:#145214,color:#ffffff;
+    classDef outbox fill:#ff7f0e,stroke:#9c4a00,color:#ffffff;
+    classDef partner fill:#9467bd,stroke:#4b276b,color:#ffffff;
+
+    class CTRL_INGEST,CTRL_INTERNAL controller;
+    class W1,W2,W3,W4,W5 worker;
+    class OUTBOX outbox;
+    class P1,P2,OPS partner;
 ```
 
 ## Module-level dependency direction
@@ -136,6 +150,13 @@ roles include `audit` and `platform`.
 
 - **`PartnerAuthFilter`** sits in front of partner endpoints only. Internal
   endpoints bypass it (per case spec — internal user auth is out of scope).
+- **In-memory partner cache** (`PartnerCacheConfig`): per-pod Caffeine cache
+  fronting `PartnerRepository`. `expireAfterWrite=60s`, `maximumSize=10_000`,
+  populated on miss via `partners::findById`. On HMAC verify failure the
+  filter invalidates the entry, reloads from `partners`, and retries once —
+  this absorbs secret-rotation windows without operator intervention. Stats
+  are exposed as `peg.partner_cache.size` and `peg.partner_cache.hit_ratio`
+  gauges to Prometheus.
 - **`OutboxPoller`** runs only on pods with the API runtime role (see
   `RuntimeProperties.runsOutboxPoller()`). Multiple API pods coordinate via
   `FOR UPDATE SKIP LOCKED`.

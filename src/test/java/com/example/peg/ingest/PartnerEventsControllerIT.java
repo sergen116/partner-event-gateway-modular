@@ -181,6 +181,29 @@ class PartnerEventsControllerIT {
     }
 
     @Test
+    void postWithUnknownEventType_returns400() throws Exception {
+        // Unknown eventType throws IllegalArgumentException inside Jackson @JsonCreator,
+        // which Spring wraps in HttpMessageNotReadableException. Must surface as 400, not 500.
+        byte[] bodyBytes = "{\"eventType\":\"NotARealType\",\"payload\":{}}".getBytes(StandardCharsets.UTF_8);
+        String ts = Instant.now().toString();
+        String sig = sign(ts, "POST", "/api/v1/events", bodyBytes);
+
+        MvcResult result = mvc.perform(post("/api/v1/events")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .header(props.getHeaders().getPartnerId(), PARTNER_ID)
+                        .header(props.getHeaders().getTimestamp(), ts)
+                        .header(props.getHeaders().getSignature(), sig)
+                        .content(bodyBytes))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INVALID_REQUEST_BODY"))
+                .andReturn();
+
+        assertThat(result.getResponse().getContentAsString())
+                .contains("unknown event type")
+                .contains("NotARealType");
+    }
+
+    @Test
     void getEventById_returnsExistingEvent() throws Exception {
         // Seed an event in the DB directly so we don't depend on the outbox poller
         UUID eventId = UUID.randomUUID();
