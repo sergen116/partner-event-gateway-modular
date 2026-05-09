@@ -195,6 +195,57 @@ constantly, and rotated quickly. Daily granularity matches the operational rhyth
 a queue partition holds 1 day of in-flight messages, and 4-day retention covers a
 long weekend.
 
+### Why logged pgmq tables (and not `create_unlogged`)
+
+pgmq exposes two creation helpers: `pgmq.create_partitioned` produces ordinary
+WAL-backed tables; `pgmq.create_unlogged` produces `UNLOGGED` tables that skip
+WAL for lower write latency. We pick `create_partitioned`. The reason is the
+at-least-once contract, not throughput: an `UNLOGGED` table is **automatically
+TRUNCATEd by Postgres on crash recovery or unclean shutdown**, so any in-flight
+message in the queue at that moment is gone. Combined with
+[ADR-006](#adr-006-outbox-delete-on-send) — the outbox row is deleted the
+moment `pgmq.send` returns — that means the queue table is the *only* surviving
+copy of the message between forward and consumer ack. Losing it breaks the
+contract.
+
+What logged tables buy us:
+
+- **Crash-survivable in-flight messages.** A pod restart, OOM kill, or `pg_ctl
+  restart` for a minor-version upgrade does not silently drop queued events.
+- **DLQ integrity.** `pgmq.a_<queue>` archive tables follow the same logged
+  setting. Failed-message forensics survive exactly the incidents you need them
+  for.
+- **Replication and PITR work.** Standby replicas see queue state, and
+  `pg_basebackup` / WAL-archive PITR include queue contents — relevant once a
+  read replica or DR posture is added.
+- **`DROP PARTITION` retention stays viable.** Daily partitions on a logged
+  table give O(1) cleanup via pg_partman_bgw. Unlogged would force scheduled
+  `DELETE` + `VACUUM` over the hot tables — the exact contention pattern that
+  hurts at the 2K TPS Stage 2 target (capacity table below).
+
+What it costs us:
+
+- **WAL fsync on every `pgmq.send`** (~0.5–2 ms versus unlogged). This is the
+  same fsync ceiling already noted as the throughput limiter further down in
+  this section.
+- **Higher WAL volume**, which shows up as replica lag pressure and archive
+  cost during sustained burst.
+- **pg_partman + `pg_partman_bgw` operational dependency** (`shared_preload_libraries`
+  config and `docker/init/00-configure-partman.sh`).
+
+The latency win from going unlogged is largely invisible here. The producer
+side runs through `OutboxPoller` at fixed cadence (`POLL_INTERVAL=250 ms`,
+`BATCH_SIZE=50`), so per-send latency is not the drain bottleneck — see
+[ADR-002](#adr-002-transactional-outbox-vs-direct-pgmqsend). The consumer side
+is gated by handler work and connection-pool capacity, not WAL on the queue
+table. So switching to unlogged would pay the full durability cost for an
+optimisation that doesn't unblock any documented bottleneck.
+
+If write latency on the queue tables ever does become the actual bottleneck,
+the durability-preserving levers are `synchronous_commit = off` per producer
+session, `pgmq.send_batch`, or replacing the polling drain with a `LISTEN/NOTIFY`-
+triggered batch — all keep the at-least-once contract intact.
+
 ### Processing flow
 
 1. Partner POSTs HMAC-signed event.

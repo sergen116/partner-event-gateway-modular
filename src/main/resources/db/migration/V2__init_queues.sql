@@ -4,6 +4,13 @@
 -- Daily partitions, 4-day retention.
 -- =============================================================
 
+-- These tables are intentionally logged (WAL-backed), not unlogged.
+-- pgmq.create_unlogged would be faster on write but Postgres TRUNCATEs
+-- unlogged tables on crash recovery, which would break at-least-once
+-- delivery (the outbox row is deleted on pgmq.send) and wipe the DLQ
+-- (pgmq.a_*) exactly when forensics matter. See docs/ARCHITECTURE.md
+-- "Why logged pgmq tables".
+
 -- pg_partman background worker drops partitions older than retention.
 -- It must be configured in postgresql.conf:
 --   shared_preload_libraries = 'pg_partman_bgw'
