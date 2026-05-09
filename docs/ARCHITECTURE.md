@@ -97,7 +97,8 @@ which beans get instantiated.
 
 - **`OutboxRepository` + `OutboxPoller`** — drain `event_outbox` into pgmq via
   `FOR UPDATE SKIP LOCKED`. Rows are deleted on successful send — see
-  [ADR-006](#adr-006-outbox-delete-on-send).
+  [ADR-006](#adr-006-outbox-delete-on-send),
+  [ADR-012](#adr-012-single-event_outbox-table-not-split-per-event-type).
 - **`PgmqWorker`** (base) + 5 per-event-type subclasses. Each polls one pgmq queue,
   fans batch processing across virtual threads bounded by a Semaphore, enforces a
   batch deadline below the visibility timeout via
@@ -802,3 +803,45 @@ relay calls `send` per outbox row and attaches the outbox-delete +
 event-status update to the callback. The application gets per-topic batching
 for free without owning any grouping logic, so the rationale that justifies
 per-row send today does not survive the broker swap.
+
+### ADR-012: Single `event_outbox` table, not split per event type
+
+**Decision:** One `event_outbox` table for all event types. Routing to the
+correct pgmq queue happens via the `queue_name` column the row carries, not via
+table identity.
+
+**Why one table.** The outbox is a transient buffer between API ingest and
+`pgmq.send`. Rows are deleted on successful forward
+([ADR-006](#adr-006-outbox-delete-on-send)), so steady-state size is bounded by
+`poll_interval × write_rate` regardless of type mix. Splitting the buffer by
+type would multiply schema, indexes, poller wiring, and migration surface
+without changing that bound.
+
+**Splitting would need a concrete differentiator.** Three are real, none apply
+today:
+
+1. **Retention or compliance per type** — e.g. one type must be retained
+   longer or stored under a different regulatory regime than the others. The
+   audit trail lives in the `events` table + `audit/` module, not the outbox,
+   so there is nothing to retain in the outbox by type in the first place.
+2. **Extreme volume skew** — one type so dominant that its churn starves the
+   others' polling latency. Per-type pgmq queues already absorb downstream
+   skew ([ADR-003](#adr-003-per-event-type-queues)); the outbox itself is
+   `FOR UPDATE SKIP LOCKED` over a short queue and is not the bottleneck.
+3. **Per-type DB sharding** — the outbox is co-located with the type's events
+   on a separate database. Out of scope at current sizing; a migration
+   concern, not a current design concern.
+
+**Audit lives elsewhere.** The outbox is not the audit trail. The durable
+record is `events` + `event_audit_log`, queried via the `audit/` module's
+`historyFor` (see [ADR-006](#adr-006-outbox-delete-on-send) and
+[ADR-008](#adr-008-monthly-partitioning-for-events-and-audit)). This is what
+makes delete-on-send defensible: the outbox row vanishing carries no
+information loss, because every transition — including the
+`RECEIVED → PENDING` moment that means "outbox forwarded" — is already in the
+audit log.
+
+**Trade-off:** If a future event type shows up with a hard per-type retention
+or sharding requirement, splitting becomes a migration (new table, dual-write
+window, poller fan-out). Acceptable — the trigger is concrete and observable,
+and the migration is local to the delivery module.
