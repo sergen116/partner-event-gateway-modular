@@ -244,6 +244,11 @@ Dockerfile                             Multi-stage: build → layer-extract → 
 7. **Default query window of 90 days** is applied to both partner and internal
    queries when no `from` / `to` is given, so partition pruning bounds the scan.
    Callers can override either bound.
+8. **No ordering guarantees are required.** The case spec does not call for
+   ordered delivery, so per-event-type pgmq queues are consumed concurrently
+   without a partition key — events for the same partner may be processed out
+   of order. See the matching entry under Limitations for the Kafka migration
+   path if ordering becomes a requirement.
 
 ## Limitations / missing parts
 
@@ -271,6 +276,11 @@ Dockerfile                             Multi-stage: build → layer-extract → 
 - **No partner self-service onboarding.** Partners are seeded via Flyway migration
   for the case study. A real platform would have an admin API to create / rotate /
   deactivate partners.
+- **No ordering guarantees.** The case study does not require ordered delivery, so
+  per-event-type pgmq queues are consumed concurrently with no partition key —
+  events for the same partner can be processed out of order. If a future migration
+  to Kafka is needed, using `partner_id` as the partition key would provide
+  per-partner FIFO ordering.
 - **Tenant scoping is explicit, not implicit.** There is no `TenantContext`
   thread-local + Hibernate filter that would auto-inject `partner_id` into
   every query. The persistence layer is JdbcTemplate + raw SQL because pgmq is
