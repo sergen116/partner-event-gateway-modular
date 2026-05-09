@@ -201,6 +201,7 @@ Pre-rehearsed answers:
 |---|---|
 | Why pgmq and not Kafka/RabbitMQ? | "At case scale, pgmq lets the events insert and queue insert share one transaction in one DB. Kafka becomes lever #19 when a single queue saturates per-heap contention." |
 | Why outbox if pgmq is in the same DB? | (See ADR-002 talking points above.) |
+| Why `create_partitioned` and not `create_unlogged` for the pgmq queues? | "Unlogged tables get TRUNCATEd by Postgres on crash recovery. After the outbox row is deleted on `pgmq.send` (ADR-006), the queue table is the only copy of an in-flight message — and the archive table (DLQ) inherits the same setting. Unlogged would silently break at-least-once and wipe forensics exactly when you need them. The trade-off — WAL fsync per `pgmq.send` — is hidden behind the 250 ms outbox poll cadence anyway. Documented in ARCHITECTURE.md §4 'Why logged pgmq tables'." |
 | What if Postgres goes down? | "Single failure domain by design at case scale. HA = managed Postgres + read replica (already wired opt-in via `REPLICA_DB_URL`); cross-region is out of scope." |
 | How do you handle poison messages? | "`read_ct >= maxAttempts` (default 5) → `pgmq.archive` + events row marked FAILED. DLQ is the pgmq archive table; replay = re-insert into outbox." |
 | How does ordering work? | "Per-event-type queues, no in-queue ordering guarantee. Per-partner ordering: shard by `hash(partner_id) % N`, covered in `06-stage2-topology.md`." |
