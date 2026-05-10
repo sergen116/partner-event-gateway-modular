@@ -650,6 +650,49 @@ Operations who want to query pgmq directly via the message ID must trace it from
 pgmq's own metadata, not the events table. Acceptable — operations rarely need
 this in practice.
 
+**Stage 2 evolution — time-partition the outbox and drop sent rows by partition (documented, not deployed).**
+The bounded steady-state argument the V1 migration relies on
+(`V1__init_schema.sql:97-100` — ~250 rows at 1 k/sec, 250 ms poll) is what
+makes per-row DELETE invisible at Stage-1 rates. At sustained Stage-2
+throughput that argument no longer holds, and the same hot pages of
+`event_outbox` carry three costs at once:
+
+1. **DELETE-vs-FOR-UPDATE page contention.** Ingest, the poller's
+   `SELECT … FOR UPDATE SKIP LOCKED`, and the per-row `DELETE` all touch
+   the live tail of the heap and `ix_outbox_id`. Row-level locks don't
+   collide (SKIP LOCKED), but page-level buffer pins, hint-bit dirtying,
+   and WAL flushes do — DELETE churn lands on the same pages the next
+   poll batch is about to claim.
+2. **Dead-tuple churn and autovacuum I/O.** Every successful send leaves
+   a dead tuple on a page the poller and ingest are still touching.
+   Autovacuum competes with both for the same buffers, and on a hot
+   table the aggressive thresholds keep it running near-continuously.
+3. **Index bloat on `ix_outbox_id`.** BIGSERIAL inserts append cleanly;
+   the *DELETE* of recently-inserted keys from the rightmost B-tree
+   leaves is the bloat source.
+
+The fix is symmetric with the daily pgmq queue partitions in
+[ADR-008](#adr-008-monthly-partitioning-for-events-and-audit): convert
+`event_outbox` to `PARTITION BY RANGE (created_at)` with daily child tables
+managed by `pg_partman`, retention one to two days, `retention_keep_table=false`
+so partitions drop wholesale. **The per-row `DELETE` is removed from
+`OutboxPoller.drain()` entirely** — sent rows age out with their partition
+via a metadata `DROP PARTITION`, not row-by-row I/O. The poller's claim
+predicate gains a `sent_at IS NULL` filter (or equivalent partial-index
+column) so already-forwarded rows still in today's partition aren't
+reclaimed on the next poll.
+
+**Trade-off:** disk usage rises from ~250 rows steady-state to up to one
+day's volume on the active partition (e.g. ~86 M rows at 1 k/sec) before
+rotation. Acceptable because (a) the partition is dropped wholesale rather
+than vacuumed, (b) the events table remains the audit source of truth so
+the outbox partitions stay a pure transient buffer, and (c) the same
+partition shape and `pg_partman` plumbing are already in use for pgmq
+queues. **Why not Stage 1:** at current rates the DELETE cost is invisible —
+pulling this lever before DELETE I/O shows up on `pg_stat_statements` or
+autovacuum lag on `event_outbox` correlates with poller p99 spikes is
+overhead without payoff. Known limitation and accepted tradeoff for Stage 1.
+
 ### ADR-007: Specifications without JPA
 
 **Decision:** The persistence layer is JdbcTemplate + raw SQL throughout — no JPA,
@@ -864,7 +907,9 @@ shape as the per-type pgmq queues one layer down:
    delete-on-send ([ADR-006](#adr-006-outbox-delete-on-send)). At sustained
    high write rates this produces continuous dead-tuple churn — heap and
    index bloat, aggressive autovacuum overhead competing with ingest I/O
-   on the same table.
+   on the same table. An orthogonal cure — time-partitioning the outbox so
+   sent rows age out via `DROP PARTITION` instead of row-by-row DELETE — is
+   documented in [ADR-006 § Stage 2 evolution](#adr-006-outbox-delete-on-send).
 
 The fix is symmetric with the queue-side fix: split *that one* type into its
 own outbox table (`event_outbox_order_created`); leave the cool four sharing

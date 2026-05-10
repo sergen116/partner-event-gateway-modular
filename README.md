@@ -272,6 +272,16 @@ Dockerfile                             Multi-stage: build → layer-extract → 
 - **Outbox poll cadence and batch are constants.** `BATCH_SIZE=50` and
   `POLL_INTERVAL=250 ms` are hardcoded in `OutboxPoller.java`. Promoting them to
   `app.outbox.*` properties is a small follow-up.
+- **Outbox retention is per-row DELETE, not partition rotation.**
+  `OutboxPoller` calls `DELETE FROM event_outbox WHERE id = ?` on every
+  successful send. At Stage-1 throughput this is invisible (steady-state
+  ~250 rows), but at sustained Stage-2 rates the DELETE path contends with
+  `SELECT … FOR UPDATE SKIP LOCKED` and tail INSERTs on the same heap pages,
+  producing dead-tuple churn and autovacuum I/O. The Stage-2 alternative —
+  daily partitions on `event_outbox` with `DROP PARTITION` retention and the
+  per-row DELETE removed from the poller — is documented in
+  [ADR-006 § Stage 2 evolution](docs/ARCHITECTURE.md#adr-006-outbox-delete-on-send).
+  Known limitation, accepted tradeoff for Stage 1.
 - **No production-grade secret management.** See assumption #3.
 - **No partner self-service onboarding.** Partners are seeded via Flyway migration
   for the case study. A real platform would have an admin API to create / rotate /
