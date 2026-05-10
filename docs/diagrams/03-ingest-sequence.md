@@ -9,6 +9,7 @@ sequenceDiagram
     autonumber
     actor Partner
     participant Filter as PartnerAuthFilter
+    participant Cache as PartnerCache<br/>(Caffeine, 60s TTL)
     participant Verifier as HmacVerifier
     participant Ctrl as PartnerEventsController
     participant Ingest as EventIngestService
@@ -19,12 +20,27 @@ sequenceDiagram
 
     Partner->>Filter: POST /api/v1/events<br/>Headers: X-Partner-Id, X-Timestamp,<br/>X-Signature, Idempotency-Key
 
-    Filter->>DB: SELECT FROM partners WHERE partner_id = ?
-    DB-->>Filter: partner row (secret_hash, active)
+    Filter->>Cache: get(partner_id)
+    alt cache hit
+        Cache-->>Filter: cached partner
+    else cache miss
+        Cache->>DB: SELECT FROM partners WHERE partner_id = ?
+        DB-->>Cache: partner row (secret_hash, active)
+        Cache-->>Filter: loaded partner (cached for 60s)
+    end
 
     Filter->>Verifier: verify(partner, ts, method, path, body, sig)
     Note over Verifier: 1. timestamp within ±5min<br/>2. HMAC-SHA256 over canonical msg<br/>3. constant-time compare
-    Verifier-->>Filter: ok = true
+    Verifier-->>Filter: ok
+
+    alt verify failed (possibly stale cache during rotation)
+        Filter->>Cache: invalidate(partner_id)
+        Filter->>DB: SELECT FROM partners WHERE partner_id = ?
+        DB-->>Filter: fresh partner row
+        Filter->>Verifier: verify(...) — retry once
+        Verifier-->>Filter: ok or 401
+        Note over Filter,Cache: on success: cache.put(partner)
+    end
 
     Filter->>Ctrl: forward request (partner_id attribute set)
 
@@ -88,6 +104,7 @@ That's the whole point.
 | When | What happens |
 |---|---|
 | HMAC fails | Filter throws 401, no DB writes |
+| HMAC fails on cached partner (secret rotated) | Cache invalidated, partner re-fetched from DB, verify retried once; if still bad → 401 |
 | API crashes after `events` insert, before `outbox` insert | All of `events` + audit + `outbox` rolled back (same transaction) |
 | Two concurrent first-time submissions race past the initial `SELECT` | Loser gets `rows = 0` from `INSERT`, re-`SELECT`s the winner, skips outbox |
 | API crashes after commit, before response | Partner retries → idempotency catches it |
