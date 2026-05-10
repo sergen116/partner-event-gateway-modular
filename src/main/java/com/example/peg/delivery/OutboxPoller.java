@@ -70,8 +70,9 @@ public class OutboxPoller {
     private void pollSafely() {
         try {
             int drained = drain();
-            if (drained == BATCH_SIZE) {
-                log.debug("drained full batch of {} from outbox", drained);
+            if (drained > 0) {
+                log.info("outbox poll cycle complete — processed {} row(s){}",
+                        drained, drained == BATCH_SIZE ? " (full batch, more may be pending)" : "");
             }
         } catch (Exception ex) {
             log.error("outbox poll failed", ex);
@@ -86,18 +87,27 @@ public class OutboxPoller {
     int drain() {
         return tx.execute(status -> {
             var rows = outbox.claimBatch(BATCH_SIZE);
+            if (rows.isEmpty()) {
+                return 0;
+            }
+            log.info("outbox poll started — claimed {} row(s) for forwarding", rows.size());
             for (var row : rows) {
                 try {
+                    log.info("forwarding outbox row id={} eventId={} partnerId={} queue={} attempts={}",
+                            row.id(), row.eventId(), row.partnerId(), row.queueName(), row.attempts());
                     sendToPgmq(row);
                     // Outbox row's job is done — events table is the audit source.
                     outbox.deleteSent(row.id());
                     events.markPending(row.partnerId(), row.eventId(), ACTOR);
+                    log.info("forwarded outbox row id={} eventId={} — sent to pgmq, deleted, marked pending",
+                            row.id(), row.eventId());
                 } catch (Exception ex) {
                     log.error("failed to forward outbox row id={} eventId={}",
                             row.id(), row.eventId(), ex);
                     outbox.recordFailure(row.id());
                 }
             }
+            log.info("outbox drain finished — total={}", rows.size());
             return rows.size();
         });
     }
