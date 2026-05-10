@@ -15,6 +15,7 @@ import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.slf4j.MDC;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -34,6 +35,7 @@ import java.util.UUID;
 @RequestMapping("/api/v1/events")
 @Tag(name = "partner-events", description = "Partner-facing event submission and querying")
 @RequiredArgsConstructor
+@Slf4j
 public class PartnerEventsController {
 
     /** Default lookback window when the caller doesn't specify one. */
@@ -62,6 +64,10 @@ public class PartnerEventsController {
         try (MDC.MDCCloseable ignored = MDC.putCloseable("event_id", eventId.toString())) {
             var result = ingest.ingest(partnerId, eventId, body);
 
+            log.info("event submitted partner={} eventId={} eventType={} businessRef={} duplicate={} status={}",
+                    partnerId, result.row().eventId(), body.eventType(),
+                    body.businessRef(), !result.newlyAccepted(), result.row().status());
+
             return new SubmitEventResponse(
                     result.row().eventId(),
                     result.row().status(),
@@ -75,6 +81,7 @@ public class PartnerEventsController {
             description = "Retrieve a single event by its id. Partners can only see their own events.")
     public EventResponse getOne(@PathVariable UUID eventId, HttpServletRequest request) {
         String partnerId = (String) request.getAttribute(PartnerAuthFilter.ATTR_PARTNER_ID);
+        log.debug("event lookup partner={} eventId={}", partnerId, eventId);
         return events.findById(partnerId, eventId)
                 .map(EventResponse::from)
                 .orElseThrow(() -> Errors.notFound("event not found"));
@@ -122,6 +129,10 @@ public class PartnerEventsController {
 
         long total = events.count(q);
         List<EventResponse> items = events.query(q).stream().map(EventResponse::from).toList();
+
+        log.debug("event query partner={} page={} size={} eventType={} status={} businessRef={} total={} returned={}",
+                partnerId, page, size, eventType, status, businessRef, total, items.size());
+
         return PageResponse.of(items, page, size, total);
     }
 

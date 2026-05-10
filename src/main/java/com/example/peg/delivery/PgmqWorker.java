@@ -222,6 +222,9 @@ public abstract class PgmqWorker {
             MDC.put("event_id", event.eventId().toString());
             MDC.put("event_type", event.eventType().name());
 
+            log.info("handling event queue={} msg_id={} eventType={} attempt={}",
+                    queueName(), m.msgId(), event.eventType(), m.readCt());
+
             try (TraceContextCarrier.SpanScope ignored = TraceContextCarrier.startConsumerSpan(
                     "pgmq.consume " + queueName(),
                     event.traceparent(), event.tracestate())) {
