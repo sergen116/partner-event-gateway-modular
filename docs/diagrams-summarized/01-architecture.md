@@ -118,7 +118,7 @@ Multi-tenant event gateway: partners → HMAC-SHA256 over HTTPS → durable acce
 - **Assumptions to verify before committing 2K** — handler p99 ≤ 100 ms (Resilience4j retries push worst-case to ~1.5 s on transient failures, which collapses effective concurrency); Postgres ~12K writes/sec (`pgbench -j 8 -c 32 -T 60`; WAL fsync is the limiter); outbox poller promoted from constants to `app.outbox.*` (lever #5); PgBouncer multiplexes ~350 clients → 50–80 backends; KEDA manifests deployed.
 - **5-layer scaling diagnostic** — name the symptom first (L1 consumer throughput / L2 pickup latency / L3 producer-API / L4 DB tier / L5 single hot type). Pick cheapest lever that targets it; don't reach for #18 when #1 isn't tried (`08-scaling-and-tradeoffs.md`).
 - **L5 escape hatch** — single saturated queue ≠ blanket fix. Shard *that one* queue by `hash(partner_id) % N` (lever #18). Partner-id key preserves per-tenant ordering and keeps all N shards hot in parallel (random breaks ordering; time-based rotates one at a time = same hot-tail problem). Eventually swap that one queue to Kafka (lever #19); outbox is the seam that keeps swap cheap (ADR-013).
-- **Hot-outbox split** — if one event type's volume crosses the per-heap ceiling at the outbox layer too, split *that one* type into its own table (`event_outbox_order_created`); leave the cool four sharing `event_outbox`. Symmetric with the queue-side fix (ADR-012 § Stage 2 evolution).
+- **Hot-outbox split — the producer-side mirror of L5** — same shape as queue-side sharding, applied one layer up. When one type dominates outbox writes (three symptoms: tail-page lock contention across pods, autovacuum I/O on the hot table competing with ingest, DELETE-on-send churn dominating the table), split *that one* type into its own table (`event_outbox_order_created`); leave the cool four sharing `event_outbox`. If the per-type heap saturates too, apply `hash(partner_id) % N` to the split table — same shard key as queue-side. Full rationale: ADR-012 § Stage 2 evolution + § Open design decisions › 3 *Why one outbox today (and when to split per type)*.
 
 #### Efficient reads/writes
 - **Partition pruning** — `events`, `event_audit_log` partitioned monthly by `created_at` / `occurred_at`; pgmq queues + DLQ partitioned daily. Date-bounded queries skip cold partitions. **Internal controllers default last 90 days** when neither `from` nor `to` set so unfiltered queries don't scan all 12 months.
@@ -160,6 +160,252 @@ Multi-tenant event gateway: partners → HMAC-SHA256 over HTTPS → durable acce
 - **`actor` column attributes each transition** — `"ingest"`, `"outbox-poller"`, `"worker:order-created"`, etc. Forensic index `(actor, occurred_at DESC)`.
 - **Trace correlation** — `trace_id` flows MDC → logs → `event_audit_log` not directly stored, but logs join on `partner_id` / `event_id` → trace UI for end-to-end timing.
 - **Example transition counts** — successful event has 4 audit rows (`null→RECEIVED`, `RECEIVED→PENDING`, `PENDING→PROCESSING`, `PROCESSING→PROCESSED`); FAILED has 4 ending in `PROCESSING→FAILED` with reason in `error`; redelivered+recovered has 5+ (one or more `PROCESSING→PROCESSING`).
+
+## Open design decisions — case spec coverage (interview)
+
+> Section covers the **Backend_Case.pdf § Design Guidance — Open for Your Design Decisions** items not already addressed elsewhere in this doc (API surface, request/response, payload, ERD, and service boundaries are covered by the API contract, swagger, ERD section, and the module map above). Six items × three beats each: **choice → why → trade-off / what was rejected**. Closes with a 5-layer scaling-diagnostic ladder and the cross-cutting design principles that produced the choices.
+
+### 1. Modular monolith vs microservice approach
+> *Case: "modular monolith vs microservice approach"*
+
+**Choice**: Modular monolith. 7 feature modules (`ingest, delivery, query, audit, partner, platform, shared`), acyclic compile-time deps documented in `package-info.java`, one Docker image, role chosen at runtime by `APP_RUNTIME_MODE` (ADR-005).
+
+**Why monolith over microservices at case scale**:
+- Shared DB anyway — events + outbox + audit + pgmq queues live in one Postgres. Splitting into services would *invent* a dual-write problem we don't have today.
+- Microservices would add: service mesh / discovery, per-service CI/CD, distributed tracing across N hops, N copies of partner-auth machinery, N pgmq client integrations.
+- Stage 1 → Stage 2 transition is config-only — same image, role-per-pod via env var. We get microservice-shaped horizontal scaling per role without paying the operational tax.
+
+**Why modular (not monolithic) layout**:
+- Feature modules, not technical layers. New event type touches `delivery/` only — `ingest/` stays untouched. Adding a filter is 2 lines (ADR-007 registry).
+- Acyclic DAG is enforceable (ArchUnit-style is one test away).
+- Stage 2 deploys subsets cleanly: API pod = `ingest+query+partner+audit-write`; consumer pod = `delivery+audit-write`. Zero code change.
+
+**Trade-offs**:
+- **Single-image deploy**: a critical bug in `delivery/` redeploys API pods too at Stage 1. Mitigated at Stage 2 — per-role Deployments roll affected role only.
+- **Compile-time coupling on `shared/`**: a breaking primitive change ripples to all modules. Accepted because `shared/` holds rarely-changing types (`EventType`, `EventStatus`, `EventRecord`).
+
+**When to split into services** (the trigger): one module owns its own DB (e.g. dedicated Postgres for pgmq, lever #16) **AND** its release cadence diverges **AND** the ops team can absorb the per-service overhead. Not before.
+
+### 2. Storage choice
+> *Case: "storage choice"*
+
+**Choice**: PostgreSQL only — events, audit, outbox, partner credentials, **and** in-flight queues (pgmq extension). One DB, one connection pool, one backup posture (ADR-010).
+
+**Why Postgres for OLTP data**:
+- Events + audit + partners are transactional, indexed, partition-friendly — Postgres is best-in-class for that shape.
+- JSONB for partner-defined `payload` keeps schema flexibility without giving up SQL queryability or constraints.
+- Native declarative partitioning, partial indexes, and `SKIP LOCKED` are exploited throughout — these aren't peripheral features, they carry weight.
+
+**Why pgmq for the queue (not Kafka / SQS / Redis)**:
+- Same DB → events INSERT + outbox INSERT can share one transaction. The classical "dual-write" problem doesn't exist; the outbox pattern is here for **seam value** (ADR-002 / ADR-013), not atomicity.
+- pgmq operations (`pgmq.send`, `pgmq.read`, `pgmq.archive`) are SQL function calls → no second client lib, no second pool, no second auth surface, no second monitoring stack.
+- DLQ via `pgmq.archive` inherits the same partitioning, backup, and PITR posture as everything else.
+- `FOR UPDATE SKIP LOCKED` (Postgres-native) is the only inter-process coordination primitive needed — no Redis distributed locks.
+
+**Why one DB instance at Stage 1**:
+- 2K-TPS-peak workload fits a single managed Postgres with headroom; PgBouncer handles connection fan-in.
+- Splitting into operational + queue DBs (lever #16) is a documented Stage-2+ evolution, not deployed.
+
+**Trade-offs**:
+- **Vendor lock-in**: every Postgres-specific feature we use is migration cost if we ever leave. Accepted — those features carry their weight.
+- **Single failure domain at Stage 1**: managed PG + replica + automated failover defends production; cross-region out of scope per case.
+- **No ORM portability**: JPA's portability promise has nothing to deliver on a 5-table no-FK schema. JdbcTemplate stays (ADR-007).
+
+**Considered and rejected**:
+- *Kafka / Redis / SQS as the queue*: introduces dual-write; we'd need outbox to bridge → exactly what we have, but with extra infra to operate and monitor.
+- *MongoDB for events*: gives up transactional guarantees we'd want; JSONB + GIN indexes already cover schemaless-payload querying.
+- *DynamoDB*: no `SKIP LOCKED` equivalent, no declarative partitioning, secondary-index discipline tax — net loss for this OLTP shape.
+
+### 3. Async processing strategy
+> *Case: "async processing strategy"*
+
+**Choice**: Transactional outbox → poller (250 ms cadence, `SKIP LOCKED` claim) → 5 pgmq queues (one per event type) → per-event-type virtual-thread workers with Semaphore-bounded concurrency.
+
+**Why outbox (not direct `pgmq.send` inside the API tx)**:
+- ADR-002. Three reasons (atomicity is **not** one — same DB makes both options equivalent on that axis):
+  1. **Future-proofing for a Kafka swap** — outbox table is the stable broker-agnostic seam (ADR-013); only `OutboxPoller.sendToPgmq` rewrites on swap.
+  2. **Shorter ingest transactions** — API tx = 2 plain INSERTs + 1 audit INSERT, not "INSERT + extension call + pgmq table writes".
+  3. **Ingest module stays queue-agnostic** — only `delivery/` imports pgmq; `ingest/` tests don't need pgmq running.
+- Cost: +250 ms median forwarding latency. Acceptable: partner contract is *"we have it durably"* (200 OK on commit), not *"the queue accepted it"*.
+
+**Why 5 queues (not 1)**:
+- ADR-003. Different processing profiles per type (latencies, priorities, burst patterns).
+- One shared queue → shared scaling + head-of-line blocking. Slow `OrderCreated` would back up `OrderCancelled`.
+- Per-type queues let KEDA scale each Deployment independently — cost goes where load goes.
+- Trade-off: 5× ops surface (5 dashboards, 5 worker classes, 5 ScaledObjects). Negligible at Stage 1.
+
+**Why one outbox today (and when to split per type)** — *the producer-side mirror of per-event-type queues*:
+- ADR-012. Single `event_outbox` is a transient buffer — rows deleted on successful `pgmq.send` (ADR-006). Steady-state size bounded by `poll_interval × write_rate` regardless of type mix.
+- Splitting per type *now* would multiply schema + indexes + poller wiring + migration surface **without** changing that bound. Outbox is `FOR UPDATE SKIP LOCKED` over a short queue and is not the bottleneck at Stage 1 / 2K-TPS-peak.
+- **Trigger to split** (Stage 2 evolution, **not deployed**): one type's volume crosses the per-heap ceiling. Three symptoms: tail-page lock contention across all API-pod pollers, autovacuum I/O on the hot table competing with ingest, DELETE-on-send churn dominating the table.
+- **Fix is symmetric with the queue side**: `event_outbox_<hot_type>` (e.g. `event_outbox_order_created`) for the dominant type; the cool four keep sharing `event_outbox`. If the per-type heap *also* saturates, apply the same `hash(partner_id) % N` shard key — same lever applied one layer up.
+- Why this matters in interview: it shows the producer side has the same evolution path as the consumer side (§ Availability & Performance › L5 escape hatch), keeping symmetry across both sides of the queue.
+
+**Why virtual threads + Semaphore (not platform thread pool)**:
+- ADR-004. Handler is I/O-bound (DB writes + downstream HTTP).
+- Platform pool: pinned at startup, under-sized → throughput cap, over-sized → memory waste, 5-knob tuning per type.
+- VT + Semaphore: VTs are cheap (memory, not OS thread); Semaphore caps the actual scarce resource — DB connections.
+- pgjdbc 42.7.2+ + Hikari 5.1.0+ moved off `synchronized` to `ResourceLock` → VTs park cleanly without pinning.
+- Cost: Java 21+ requirement (we ship on 21).
+
+**Why two-tx claim/finalize (not one tx wrapping the handler)**:
+- Long handlers + Resilience4j retries can push duration into seconds. Holding a tx + DB connection that long → connection budget collapses under load.
+- Two short transactions: tx 1 claim, commit, release; handler runs **outside** any tx; tx 2 finalize, commit. Connection held only for SQL.
+- Recovery falls out for free: handler crash → row stays committed in PROCESSING; pgmq VT redelivers; next worker reclaims via `PROCESSING → PROCESSING` rule on `tryMarkProcessing`.
+
+**Why work-conserving poll loop (not fixed cadence)**:
+- Fixed 500 ms → idle queues fine, loaded queues introduce 500 ms latency floor per cycle.
+- Work-conserving: full batch → 20 ms busy-poll; partial/empty → 500 ms idle-poll. Loaded queue runs at `batch_processing_time + 20 ms`; idle queue stays cheap.
+
+### 4. Retry / error handling approach
+> *Case: "retry/error handling approach"*
+
+**Choice**: Two retry layers, **composed not stacked** — fast in-process Resilience4j + durable pgmq redelivery.
+
+**Layer 1 — Resilience4j on `DownstreamCallService`** (ADR-009):
+- `@Retry`: 3 attempts × 200 ms exponential. Absorbs transient blips (connection resets, 5xx) without paying a pgmq round-trip.
+- `@CircuitBreaker`: 50% failure rate over 20-call sliding window, opens 10 s, auto half-open. Stops the worker pool from turning into a retry generator during sustained outages.
+- 4xx **excluded** from `retry-exceptions` — caller bugs fail fast, don't burn the budget.
+- Total in-process budget ≪ pgmq VT-5s deadline (25 s) — retry never collides with the visibility timeout.
+- Fallback **rethrows**: exception propagates out of `EventProcessor.process` → row stays committed in PROCESSING → pgmq's outer redelivery applies.
+
+**Layer 2 — pgmq visibility timeout + `read_ct`**:
+- VT = 30 s. Worker crash mid-processing **or** handler timeout → message reappears, next worker reclaims.
+- `read_ct >= maxAttempts (5)` → `pgmq.archive` + events row marked FAILED + audit row written.
+- DLQ inspection: archive table **and** `events WHERE status='FAILED'` (forensic data in both places). Replay = re-INSERT outbox row from archive.
+
+**Why two layers (not just one)**:
+- Resilience4j alone: in-memory state, dies with the pod. Pod crash mid-retry loses retry state — can't tell *"attempt 1 or attempt 4?"*.
+- pgmq alone: every retry is a full pod-to-DB round trip + JSON deserialize + connection acquire. Burns DB I/O on transient blips.
+- Composed: in-process for blips (cheap); pgmq for outages (durable). Clear ownership, clear timeout budget.
+
+**Why Resilience4j (not Spring `@Retryable`)**:
+- `@Retryable` lacks circuit breaker; Resilience4j composes both in one annotation set.
+- Resilience4j metrics auto-publish to Micrometer (`resilience4j_retry_calls_total`, `resilience4j_circuitbreaker_state`) → ops dashboard for free.
+
+**Atomic state transitions as the safety net**:
+- Every transition is `UPDATE … WHERE status IN (...)`. Read-then-write race conditions can't exist by construction.
+- `tryMarkProcessing` accepts both PENDING and PROCESSING — handles redelivery cleanly without read-modify-write.
+
+**Trade-offs**:
+- Worst case: 3 in-process × 5 pgmq = 15 attempts before DLQ. Mitigated by 4xx exclusion + tight in-process budget + pgmq's `maxAttempts` cap.
+- `DownstreamCallService` MUST stay a separate bean from `EventProcessor` — Spring AOP doesn't intercept self-invocation. Documented in ADR-009.
+- DLQ replay is manual today (re-INSERT outbox row from archive). Acceptable for case scope; production = CLI tool.
+
+### 5. Observability
+> *Case: "observability"*
+
+**Choice**: Three pillars (logs, metrics, traces) correlated by a single `trace_id`. All ship from one Spring Boot process. Implementation drilldown lives in **§ Observability — 3 pillars** below.
+
+**Logs (SLF4J / Logback)**:
+- Two profiles — human-readable for local; `json` profile with `LogstashEncoder` for prod (`SPRING_PROFILES_ACTIVE=json`).
+- MDC fields populated at boundaries: `trace_id`, `span_id`, `partner_id`, `event_id`, `queue`, `msg_id`, `event_type`. Async logs carry the same identifiers — trace survives the API → outbox → pgmq → worker handoff.
+
+**Metrics (Micrometer / Prometheus, `/actuator/prometheus`)**:
+- Common tags `application` + `role=APP_RUNTIME_MODE` so per-role pods produce distinct time series.
+- Built-in: JVM, `http_server_requests_*`, `hikaricp_connections_*`, Resilience4j retry / breaker.
+- App-specific (`peg.*`): queue length (KEDA input), oldest-msg-age, processed/failed/dlq counts, consumer duration histogram, free Semaphore permits, partner-cache hit ratio.
+- Alert seeds: `oldest_msg_age > 60 s`, any `dlq` increment, breaker `OPEN`, `hikaricp_connections_pending` sustained, 5xx rate > 0.
+
+**Traces (Micrometer Tracing → OpenTelemetry → OTLP/HTTP)**:
+- W3C propagation. **Always-on context, opt-in export** — spans always created, OTLP exporter only registers when `MANAGEMENT_OTLP_TRACING_ENDPOINT` is set. Logs stay correlatable locally with no collector running.
+- Sampling: `management.tracing.sampling.probability` (env `TRACING_SAMPLING`, default 0.1).
+- Async boundary bridged by `TraceContextCarrier`: HTTP span W3C headers inlined into `PartnerEventMessage` JSON; worker opens CONSUMER-kind span as child of producer context. One trace covers `HTTP POST → outbox → pgmq → worker → DownstreamCallService`.
+
+**Health (`/actuator/health`)**:
+- DB ping, Flyway, Resilience4j breaker, Hikari indicator.
+- `HikariPoolHealthIndicator` returns DEGRADED (not DOWN) when `threadsAwaitingConnection > 0`. Pod stays in service while pool pressure is observable; DOWN would yo-yo it out of the LB.
+
+**Why three pillars (not just one)**:
+- Metrics: aggregate signal, no per-event detail.
+- Logs: per-event detail, no traffic-shape visibility.
+- Traces: per-request causality across the async boundary.
+- Pivoting on `trace_id` covers the diagnosis triangle: *what's happening* (metrics) → *where* (traces) → *why* (logs).
+
+**Trade-offs**:
+- No log-derived metrics (Loki count queries) — slow + brittle. Micrometer counters are the durable interface.
+- No dashboards in repo — deploy-target-specific. Alerts and metric shapes are what we own.
+
+### 6. Deployment / scaling approach
+> *Case: "deployment/scaling approach"*
+
+**Choice**: Same Docker image runs **all 7 runtime modes**; deploy shape switched by `APP_RUNTIME_MODE`. Stage 1 (default, ships configured) = single `CONSUMER_ALL` pod. Stage 2 (documented evolution path, **not deployed**) = per-role Deployments + KEDA + PgBouncer. Config-only transition.
+
+**Stage 1**:
+- One JVM hosts API + 5 consumer workers + outbox poller + queue-depth exporter.
+- `HIKARI_MAX=40` covers worst-case ~31–35 connection demand (24 worker slots + 5–10 API + 1 poller + 1 exporter).
+- 1-pod ceiling ~400 msg/s steady; aggressive tuning (104 slots, `HIKARI_MAX=120`, outbox 200 msg/100 ms) absorbs **short** 2K bursts but every dimension of headroom collapses to one process.
+
+**Stage 2**:
+- 1 API Deployment (`APP_RUNTIME_MODE=API`, replicas 3).
+- 5 consumer Deployments — one per event type (`CONSUMER_ORDER_CREATED`, …, `CONSUMER_ORDER_CANCELLED`).
+- KEDA `postgres scaler` queries `pgmq.metrics(queue).queue_length` directly → drives HPA per Deployment with per-type `targetQueryValue` (500 high-volume; 50 latency-sensitive).
+- PgBouncer transaction-mode in front of Postgres: 32 pods × 6 = 192 client connections multiplexed onto ~50 backends. Postgres never sees more than 50 active regardless of pod count.
+- Worked sizing for 2K TPS sustained: 14 consumer + 3 API pods → ~2130 msg/s.
+
+**Why same image, not per-role builds**:
+- ADR-005. One image → one CI pipeline, one SBOM, one CVE patch path.
+- Image is slightly larger than each role strictly needs; JRE + Spring Boot dwarf the app code; negligible.
+
+**Why KEDA over native HPA**:
+- Natural scaling signal is `pgmq.queue_length` — already in Postgres.
+- Native HPA needs metrics-API (custom-metrics-apiserver / Prometheus Adapter); the metric routes through Prometheus first.
+- KEDA queries Postgres directly → fewer moving parts, fresher metric.
+
+**Why PgBouncer**:
+- Per-pod Hikari pool small (6) for tx-mode compatibility. Without PgBouncer at 32 pods × 6 = 192 client connections, Postgres backend memory + context-switch cost dominates before throughput.
+- Transaction-mode (not session-mode) maximizes multiplexing; `prepareThreshold: 0` + `auto-commit: true` already wired to stay tx-mode-compatible.
+
+**Why Postgres-side levers before Kafka**:
+- Lever ladder (`08-scaling-and-tradeoffs.md`): #1 concurrency → … → #18 shard → #19 Kafka.
+- Most teams never get past #4. Kafka is the last-resort lever, applied surgically to *the one* queue that crosses the per-heap ceiling.
+- Outbox layer (ADR-013) keeps that swap localized to `OutboxPoller.sendToPgmq` — ingest path and `event_outbox` schema stay unchanged.
+
+**Capacity planning rule**:
+- Per-worker throughput ≈ `concurrency / handler_p99`. Per-pod = sum across workers. Total = pods × per-pod.
+- Verify before committing 2K: handler p99 (Resilience4j retries push worst case to ~1.5 s); Postgres write capacity (~12K writes/s, WAL fsync limiter); outbox poller drain rate (currently constants, lift to `app.outbox.*`).
+
+#### 5-layer scaling diagnostic — name the symptom first
+
+> Diagnose first, then pick cheapest lever that targets the symptom. Full 20-lever ladder + scorecard in `08-scaling-and-tradeoffs.md`.
+
+| Layer | Symptom | Real cause | Cheapest fix that targets it | Don't reach for |
+|---|---|---|---|---|
+| **L1** consumer throughput | queue depth grows, workers always busy | concurrency × replicas < arrival rate, or slow handler | raise Semaphore (`app.consumer.concurrency.<queue>`); add replicas; profile handler | hourly partitioning (renames contention, doesn't divide it) |
+| **L2** pickup latency | depth fine, per-msg latency high | poll interval (idle queues only — busy interval already covers loaded) | long-polling `pgmq.read_with_poll`; tune `busy-poll-interval-ms` | more pods (latency is per-msg, not throughput) |
+| **L3** producer / API | API p99 spikes during bursts, 503s | API doing too much per req, or outbox poller behind | outbox already wired; add API replicas; per-partner rate limit | any consumer-side lever |
+| **L4** database tier | Postgres pegged regardless of consumer count | underlying instance, hostile workload | PgBouncer; read replica; index audit; vacuum tuning; bigger PG | more consumer pods (makes L4 worse) |
+| **L5** single hot event type | one queue saturates, others idle | one pgmq queue = one heap, one B-tree, one autovacuum | shard *that one* queue by `hash(partner_id) % N` (#18); eventually swap that one to Kafka (#19) | spreading load across all 5 queues — only one is the problem |
+
+**Bottlenecks → first cures (quick lookup)**:
+
+| Bottleneck | First lever (cheap) | If insufficient | Last resort |
+|---|---|---|---|
+| Slow handler | profile handler, raise `Semaphore` | add consumer replicas | shard hot queue by partner_id |
+| Outbox poller behind | promote constants to `app.outbox.*`; bigger batch | per-API-pod poller (Stage 2 default) | per-type outbox split (`event_outbox_<hot>`) |
+| Hot tail-page contention | check L1 first (don't shard prematurely) | `hash(partner_id) % N` shard the saturated queue | migrate that queue to Kafka |
+| DB connection ceiling | `HIKARI_MAX` bump | PgBouncer transaction-mode | dedicated Postgres for pgmq (#16) |
+| WAL fsync ceiling | bigger Postgres / faster disk | `pgmq.send_batch` (ADR-011 lever) | move queue tier off the OLTP DB |
+| Cross-partner read pressure | enable `REPLICA_DB_URL` | tune covering indexes | dedicated read fleet |
+| Cold-tier storage cost | `retention_keep_table=true` already set | `pg_dump` to S3 ship script (#17) | shorter retention windows |
+
+**Trade-offs**:
+- **Stage 2 manifests not in repo** — case spec asks "explain how the solution could support" scaling, not deploy it. Helm/KEDA/PgBouncer manifests sketched in `07-stage2-topology.md`, not committed.
+- **No cross-region / multi-AZ posture** — out of scope per case.
+- **No GitOps / Argo manifests** — deploy-target-specific; the durable interface is the runtime mode + env vars + KEDA scaler config.
+
+### Design principles (heuristics that produced the above)
+
+1. **Diagnose first, then pick the cheapest lever**. Most "the queue is slow" tickets are misdiagnosed (L1 fix applied to L4 problem, etc.). Don't reach for #18 (shard) when #1 (raise concurrency) hasn't been tried.
+2. **Postgres-native primitives over distributed-systems infra when DB scale allows**. `SKIP LOCKED`, declarative partitioning, JSONB, partial indexes do the work that Redis / Kafka / distributed locks would otherwise do — for free, atomically, with one ops surface.
+3. **Same DB → atomicity for free; outbox is for *seams*, not atomicity** (ADR-002). Don't justify outbox with the wrong reason in interviews.
+4. **Two short transactions, not one long one**. Hold DB connections only across SQL — never across handlers, never across downstream HTTP. Resilience falls out of redelivery + atomic UPDATE-with-status-filter, not transaction lifetime.
+5. **State transitions are atomic UPDATEs with status filters** — `UPDATE … WHERE status IN (...)`. Race conditions can't exist by construction; no application locks anywhere.
+6. **Explicit binding over magic**. `partner_id` bound on every repo method, not auto-injected by AOP. Easier to audit; no surprise leaks. Cost: more typing, fewer surprises (ADR-007).
+7. **Documented evolution paths, not deployed lever ladders**. Stage 2 manifests, hot-queue sharding, hot-outbox split, Kafka migration — all sketched as natural extensions of deployed code, not committed. Commit when triggers fire, not before.
+8. **One tracing seam, not five**. `TraceContextCarrier` propagates W3C headers through pgmq JSON so a single trace covers `HTTP → outbox → pgmq → worker → downstream`. No per-segment tracing surgery.
+9. **Audit atomic with the operational write** — same transaction. No transition without audit; no audit without transition. 24-mo audit retention outliving 12-mo events retention is intentional: late compliance lookups still resolve.
+10. **DEGRADED, not DOWN, for pool pressure**. Visible to ops, doesn't yo-yo pods out of the LB.
 
 ## Observability — 3 pillars, one trace_id
 - **Logs**: SLF4J/Logback, MDC fields `trace_id, span_id, partner_id, event_id, queue, msg_id, event_type` populated at boundaries. JSON profile for prod.
