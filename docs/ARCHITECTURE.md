@@ -847,6 +847,50 @@ event-status update to the callback. The application gets per-topic batching
 for free without owning any grouping logic, so the rationale that justifies
 per-row send today does not survive the broker swap.
 
+**Where the current bottleneck actually sits.** Today's drain loop body runs
+three blocking statements per row, in the same transaction, in series:
+
+```
+for row : rows {
+    pgmq.send(queue, payload);      // (1) blocking SQL — network + queue write
+    outbox.deleteSent(row.id);      // (2) blocking SQL — same DB
+    events.markPending(...);        // (3) blocking SQL — writes audit log too
+}
+```
+
+`pgmq.send` is a **synchronous** Postgres function call; statements (2) and (3)
+cannot start until it returns. Because the whole batch is one transaction
+(`OutboxPoller.drain`, see [`src/main/java/com/example/peg/delivery/OutboxPoller.java`](../src/main/java/com/example/peg/delivery/OutboxPoller.java)),
+the per-row latency is `t(send) + t(delete) + t(markPending)` and the batch
+ceiling is `BATCH_SIZE × that sum`. At current sizing this is fine — the poller
+is not the hot path and the API has already acked — but it is the structural
+ceiling that any "make the relay faster" lever has to clear.
+
+After the Kafka swap, the only line that stays in the loop body is the
+non-blocking producer call:
+
+```
+for row : rows {
+    producer.send(record, (meta, err) -> {
+        if (err != null) { outbox.recordFailure(row.id); return; }
+        outbox.deleteSent(row.id);    // moved to callback
+        events.markPending(...);       // moved to callback
+    });
+}
+```
+
+`producer.send` returns as soon as the record is enqueued in the producer's
+in-memory accumulator — no broker round-trip, no DB round-trip. The two
+follow-up SQLs run on the producer's I/O thread when the broker acks, off the
+poller's critical path. Net effect: the drain loop fires N records into the
+accumulator at memcpy speed, the broker batches them per topic, and the
+audit/state writes pipeline behind the network, instead of blocking it.
+
+This is also why ADR-011's per-row stance is safe to keep until the swap: the
+bottleneck is the synchronous chain, not the per-row choice. Switching to
+`pgmq.send_batch` today would cut (1) but leave (2) and (3) untouched — Kafka
+removes all three from the critical path at once, which is the actual lever.
+
 ### ADR-012: Single `event_outbox` table, not split per event type
 
 **Decision:** One `event_outbox` table for all event types. Routing to the
@@ -919,3 +963,35 @@ own outbox table (`event_outbox_order_created`); leave the cool four sharing
 to the outbox table just as it applies to the pgmq queue. The full hot-queue
 outbox-split treatment lives in
 [`06-stage2-topology.md` § "When the single outbox saturates"](diagrams/06-stage2-topology.md#when-the-single-outbox-saturates-hot-queue-outbox-split).
+
+### ADR-013: Outbox layer is broker-agnostic — `event_outbox` is plain SQL, not pgmq-bound
+
+**Decision:** The `event_outbox` schema (`BIGSERIAL id`, `partner_id`, `event_id`,
+`queue_name`, `payload` JSONB) and the ingest-side write path have zero
+dependency on the pgmq extension. Only `OutboxPoller.sendToPgmq` and `PgmqWorker`
+reference pgmq.
+
+**Why.** The `OutboxPoller` claim (`SELECT … FOR UPDATE SKIP LOCKED` over
+`event_outbox`) is mechanically isomorphic to `pgmq.read`'s internal claim —
+both are SKIP LOCKED reads over a Postgres table. The natural objection is "if
+the poller does what `pgmq.read` already does, why have an outbox at all?" The
+answer is that the value of the outbox layer is not the poller but the
+**table**. `event_outbox` is plain SQL with no pgmq dependency, so when the
+broker is swapped (lever #19 in
+[`diagrams/07-scaling-and-tradeoffs.md`](diagrams/07-scaling-and-tradeoffs.md))
+the schema and the ingest write path stay unchanged — only
+`OutboxPoller.sendToPgmq` gets rewritten (to `producer.send(record, callback)`
+with the outbox-delete + event-status update attached to the callback;
+[ADR-011](#adr-011-per-row-pgmqsend-vs-pgmqsend_batch-in-the-outbox-poller)
+anticipates exactly this shape). The poller is throwaway code; the
+vendor-neutral handoff table is what we're keeping. If ingest had gone
+direct-to-pgmq, every API pod and every ingest test would carry the broker
+swap; the outbox layer scopes that swap to one background component.
+
+**Trade-off:** The poller's claim mechanism is duplicated work — pgmq already
+implements the same SKIP LOCKED loop natively. We pay that duplication cost to
+keep the table broker-neutral. Acceptable because the poller is ~100 lines and
+the benefit (a contained migration path to Kafka / SQS / any non-Postgres
+broker) is outsized. Companion to
+[ADR-002](#adr-002-transactional-outbox-vs-direct-pgmqsend), which gives the
+broader rationale for the outbox over direct `pgmq.send`.
