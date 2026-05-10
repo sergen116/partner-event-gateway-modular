@@ -56,18 +56,6 @@ scenarios where pgmq does double-deliver.
 returns 0 rows; the API reads the existing row's current state and returns it. From the
 partner's view, every retry returns whatever state the original event has reached so far.
 
-## Time bounds in production
-
-| Transition | Typical duration |
-|---|---|
-| `RECEIVED → PENDING` | ~250ms (one OutboxPoller tick) |
-| `PENDING → PROCESSING` | ~500ms (one worker poll) |
-| `PROCESSING → PROCESSED` | depends on handler — typically <100ms for trivial events, seconds for ones calling downstream services |
-| `PROCESSING → PROCESSING` (redelivery) | up to VT (30s) per attempt |
-| `PROCESSING → FAILED` | up to `maxAttempts × VT` = 150s with default config |
-
-End-to-end p50 from API ack to PROCESSED: under 1 second under normal load.
-
 ## Every transition is audited
 
 Every state transition writes a row to `event_audit_log` via `AuditLogger.transition`,
