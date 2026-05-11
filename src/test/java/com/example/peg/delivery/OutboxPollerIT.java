@@ -1,6 +1,7 @@
 package com.example.peg.delivery;
 
 import com.example.peg.PgmqPostgresInitializer;
+import com.example.peg.query.OutboxRepository;
 import com.example.peg.shared.EventStatus;
 import com.example.peg.shared.EventType;
 import com.example.peg.query.EventRepository;
@@ -27,7 +28,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 class OutboxPollerIT {
 
     @Autowired OutboxPoller poller;
-    @Autowired OutboxRepository outbox;
+    @Autowired
+    OutboxRepository outbox;
     @Autowired EventRepository events;
     @Autowired JdbcTemplate jdbc;
     @Autowired ObjectMapper mapper;

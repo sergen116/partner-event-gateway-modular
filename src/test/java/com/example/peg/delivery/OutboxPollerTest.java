@@ -2,12 +2,12 @@ package com.example.peg.delivery;
 
 import com.example.peg.platform.RuntimeProperties;
 import com.example.peg.query.EventRepository;
+import com.example.peg.query.OutboxRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.TaskScheduler;
 import org.springframework.transaction.PlatformTransactionManager;
-import org.springframework.transaction.TransactionStatus;
 import org.springframework.transaction.support.SimpleTransactionStatus;
 
 import java.util.List;

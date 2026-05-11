@@ -1,4 +1,4 @@
-package com.example.peg.delivery;
+package com.example.peg.query;
 
 import lombok.RequiredArgsConstructor;
 import org.springframework.jdbc.core.JdbcTemplate;

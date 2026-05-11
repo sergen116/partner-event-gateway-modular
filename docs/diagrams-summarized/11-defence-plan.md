@@ -1,6 +1,6 @@
-# Defence Plan — Summary (v2.3)
+# Defence Plan — Summary
 
-30-min interview script. From `DEFENCE_PLAN_V2.md` (v2 closed v1 case-coverage audit; v2.1 made NFR coverage explicit; v2.2 added Seg 3b consume walkthrough; v2.3 reframes Seg 5c as Open design decisions matrix paired with the NFR matrix — see changelog at the bottom of the source).
+30-min interview script. Condensed companion to `DEFENCE_PLAN_V2.md` (long-form source).
 
 ## Pre-talk checklist (5 min before)
 - DB up, app up (`docker compose up -d postgres && ./mvnw spring-boot:run`).
@@ -85,10 +85,10 @@ Audit history of any event = `AuditLogger.historyFor(partnerId, eventId)`. One c
 |---|---|---|---|---|
 | 1 | **Monolith vs microservice** | Modular monolith, 7 modules, same image / 7 runtime modes (ADR-005) | Seg 2 modules; Seg 5b Maint | Stage 1 single-image deploy ripples; Stage 2 splits per-role |
 | 2 | **Storage choice** | Postgres only (events + audit + outbox + pgmq) (ADR-010) | Seg 2 ERD; Seg 3 §4; Seg 3b consume | Vendor lock-in embraced — `SKIP LOCKED` + JSONB + pgmq carry weight |
-| 3 | **Async processing** | Outbox → 5 pgmq queues → VT workers + Semaphore (ADR-002, 003, 004) | Seg 3 §5; Seg 3b consume walk | +250ms latency; 5× ops surface; Java 21+ |
+| 3 | **Async processing** | Outbox → 5 pgmq queues → VT workers + Semaphore (ADR-002, 003, 004). **Stage-2 scaling ladder**: more pollers (SKIP LOCKED) → per-type table for hot → `send_batch` unlocks → shard by `hash(partner_id) % N` | Seg 3 §5; Seg 3b consume walk | +250ms latency; 5× ops surface. **ADR-011 + ADR-012 coupled**: per-row send is a consequence of single-table; splitting flips both |
 | 4 | **Retry / error handling** | Resilience4j (in-process) + pgmq redelivery (durable) (ADR-009) | Seg 3b §5; Demo E | Up to 3 × 5 = 15 attempts max; mitigated by 4xx exclusion |
 | 5 | **Observability** | 3 pillars / one trace_id; always-on context, opt-in OTLP | Demo A trace_id; Demo E `peg_*` metrics; `/actuator/prometheus` | No log-derived metrics; no dashboards in repo |
-| 6 | **Deployment / scaling** | Same image / 7 modes; Stage 1 single pod / Stage 2 per-role + KEDA + PgBouncer | Seg 5a A&P | Stage 2 manifests not deployed; cross-region OOS |
+| 6 | **Deployment / scaling** | Same image / 7 modes (ADR-005). **Consumer-side**: Stage 1 single pod / Stage 2 per-role + KEDA + PgBouncer. **Producer-side outbox ladder** (symmetric with consumer L5): more pollers → per-type table for hot → `send_batch` unlocks → shard by `hash(partner_id) % N` → Kafka per-topic batching (ADR-013) | Seg 5a A&P; `01-architecture.md § 6` | Stage 2 manifests not deployed; cross-region OOS |
 
 > *"Cross-cutting principles: diagnose first; Postgres-native primitives over distributed-systems infra; two short tx not one long; explicit binding over magic. Verbose: `01-architecture.md § Open design decisions` + `§ Design principles`."*
 
@@ -133,6 +133,8 @@ Audit history of any event = `AuditLogger.historyFor(partnerId, eventId)`. One c
 | Concurrency — race conditions? `[Conc]` | "`SKIP LOCKED` inter-process; atomic `UPDATE … WHERE status IN (...)` for transitions, no read-then-write. Ingest race: `ON CONFLICT DO NOTHING` + re-SELECT." |
 | HA if consumer pod dies mid-message? `[Rel]` | "pgmq VT (30s) → message reappears → next worker reclaims via `PROCESSING → PROCESSING` rule on `tryMarkProcessing`. Two-tx claim/finalize makes that safe." |
 | New filter? `[Maint]` | "Field on EventQuery + entry in `SPECS` registry (Demo D2)." |
+| Why per-row `pgmq.send` not `send_batch`? `[A&P][Maint]` | "Outbox spans multiple queue destinations → `send_batch` needs per-queue grouping + flush buffer in poller (Kafka accumulator pattern). Per-row keeps loop flat (ADR-011). **Coupled to ADR-012**: split hot type into `event_outbox_<hot>` → every row same destination → `send_batch` unlocks free. One step flips both. Full ladder: `01-architecture.md § 6 Outbox structure scaling path`." |
+| How does the outbox scale? `[A&P]` | "4-step ladder: (1) more API pollers [SKIP LOCKED, wired] → (2) per-type table for hot → (3) `send_batch` unlocks free at step 2 → (4) shard hot per-type by `hash(partner_id) % N`. Future: Kafka producer accumulator handles per-topic batching natively (ADR-013)." |
 | Test coverage? | "JaCoCo ≥80% line. Testcontainers full submit→outbox→pgmq→consume, HMAC reject, tenant isolation, DLQ, audit atomicity, FAILED lifecycle." |
 
 ## Tactical tips

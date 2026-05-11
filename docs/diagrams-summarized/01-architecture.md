@@ -4,7 +4,7 @@
 Multi-tenant event gateway: partners → HMAC-SHA256 over HTTPS → durable accept → async process → audit → query. Two topologies from same image: **Stage 1** (`CONSUMER_ALL`, single JVM) and **Stage 2** (per-role Deployments via `APP_RUNTIME_MODE`). Stage 1→2 is config-only.
 
 ## Modular monolith — 7 modules
-`shared` · `partner` (HMAC) · `ingest` (API → events+outbox) · `delivery` (poller+workers+processor) · `query` (filter framework, EventRepository — only cross-module shared-state boundary) · `audit` (immutable transitions) · `platform` (modes, scheduling, observability). Acyclic DAG. Stage 2 deploys API pods (`ingest+query+partner+audit`) and consumer pods (`delivery+audit`).
+`shared` · `partner` (HMAC) · `ingest` (API → events+outbox) · `delivery` (poller+workers+processor — only module that imports pgmq) · `query` (filter framework, `EventRepository` + `OutboxRepository` — the cross-module write seams) · `audit` (immutable transitions) · `platform` (modes, scheduling, observability; also wires worker beans → imports `delivery`+`query`). Acyclic DAG over feature modules. `ingest` does NOT depend on `delivery` (`OutboxRepository` lives in `query`); `query` is the only direct importer of `audit` (other modules get audit writes transitively via `EventRepository`). Stage 2 deploys API pods (`ingest+query+partner+audit`) and consumer pods (`delivery+query+audit`).
 
 ## Storage tables
 | Table | Partition | Retention |
@@ -235,11 +235,18 @@ Multi-tenant event gateway: partners → HMAC-SHA256 over HTTPS → durable acce
 - Trade-off: 5× ops surface (5 dashboards, 5 worker classes, 5 ScaledObjects). Negligible at Stage 1.
 
 **Why one outbox today (and when to split per type)** — *the producer-side mirror of per-event-type queues*:
-- ADR-012. Single `event_outbox` is a transient buffer — rows deleted on successful `pgmq.send` (ADR-006). Steady-state size bounded by `poll_interval × write_rate` regardless of type mix.
-- Splitting per type *now* would multiply schema + indexes + poller wiring + migration surface **without** changing that bound. Outbox is `FOR UPDATE SKIP LOCKED` over a short queue and is not the bottleneck at Stage 1 / 2K-TPS-peak.
-- **Trigger to split** (Stage 2 evolution, **not deployed**): one type's volume crosses the per-heap ceiling. Three symptoms: tail-page lock contention across all API-pod pollers, autovacuum I/O on the hot table competing with ingest, DELETE-on-send churn dominating the table.
-- **Fix is symmetric with the queue side**: `event_outbox_<hot_type>` (e.g. `event_outbox_order_created`) for the dominant type; the cool four keep sharing `event_outbox`. If the per-type heap *also* saturates, apply the same `hash(partner_id) % N` shard key — same lever applied one layer up.
-- Why this matters in interview: it shows the producer side has the same evolution path as the consumer side (§ Availability & Performance › L5 escape hatch), keeping symmetry across both sides of the queue.
+- **Today's structure (ADR-012)** — Single `event_outbox` is a transient buffer; rows deleted on successful `pgmq.send` (ADR-006). Steady-state size bounded by `poll_interval × write_rate` regardless of type mix. OK for initial / Stage-1 load **by assumption** — splitting per type *now* would multiply schema + indexes + poller wiring + migration surface **without** changing that bound. Outbox is `FOR UPDATE SKIP LOCKED` over a short queue and is not the bottleneck at Stage 1 / 2K-TPS-peak.
+- **Why per-row `pgmq.send()` today (ADR-011)** — the outbox holds rows destined for **multiple queues** (one per event type). `pgmq.send_batch()` takes a single queue + array of payloads, so using it would require per-queue grouping + a flush buffer in the poller — the Kafka-producer accumulator pattern in miniature, complex code for a non-hot path. Per-row keeps the drain loop a flat `for row : rows { send; delete; markPending }`. Trade-off: N round-trips per batch instead of one per queue-group, accepted because the poller is not the hot path at current sizing.
+
+**Outbox scaling ladder** (cheap → expensive) when load grows past the current bound:
+1. **More pollers first** (already wired) — add API pod replicas. Each pod runs its own `OutboxPoller`; `SELECT … FOR UPDATE SKIP LOCKED` coordinates concurrent claims across pods with **zero new code**. Contention stays row-level, not page-level.
+2. **Per-type table for the hot type** (Stage 2 evolution, **not deployed**) — when *one* type's volume crosses the per-heap ceiling (three symptoms: tail-page lock contention across all API-pod pollers, autovacuum I/O on the hot table competing with ingest, DELETE-on-send churn dominating the table), split that one into its own table — `event_outbox_order_created` for example. Cool four keep sharing `event_outbox`. Symmetric with the queue-side L5 fix.
+3. **`pgmq.send_batch()` unlocks for free at step 2** — every row in `event_outbox_order_created` targets the *same* pgmq queue, so the per-queue grouping complexity that motivates ADR-011's per-row default **disappears for that one table**. Drain loop becomes `pgmq.send_batch(queue, batch)` — one round-trip per batch instead of N. **This reveals ADR-011 + ADR-012 as a coupled design pair**: the per-row default is a *consequence* of the single-table default; splitting the table flips both at once.
+4. **Shard the hot per-type table** by `hash(partner_id) % N` if the per-type heap *also* saturates — same shard key as queue-side. Same lever applied one layer up.
+
+**Future Kafka swap (ADR-013)** — Kafka's producer accumulator handles per-topic batching **natively**, so the multi-queue grouping problem dissolves entirely. Only `OutboxPoller.sendToPgmq` rewrites; the `event_outbox` schema is broker-neutral so ingest path + tests stay unchanged. The send_batch story above is the Stage-2 stopgap; Kafka is the long-term answer.
+
+**Why this matters in interview** — the producer side has the same structured evolution path as the consumer side (§ Availability & Performance › L5 escape hatch), and the per-type-split-unlocks-batch insight ties ADR-011 + ADR-012 together as a *coupled* pair rather than two unrelated trade-offs.
 
 **Why virtual threads + Semaphore (not platform thread pool)**:
 - ADR-004. Handler is I/O-bound (DB writes + downstream HTTP).
@@ -361,6 +368,16 @@ Multi-tenant event gateway: partners → HMAC-SHA256 over HTTPS → durable acce
 - Most teams never get past #4. Kafka is the last-resort lever, applied surgically to *the one* queue that crosses the per-heap ceiling.
 - Outbox layer (ADR-013) keeps that swap localized to `OutboxPoller.sendToPgmq` — ingest path and `event_outbox` schema stay unchanged.
 
+**Outbox structure scaling path** — *producer-side mirror of queue-side L5*:
+- Today's structure: single `event_outbox` + per-row `pgmq.send()` is OK at Stage 1 / 2K-TPS-peak (bounded buffer — ADR-012; per-row send because outbox spans multiple queue destinations — ADR-011).
+- 4-step ladder when load grows past the single-table bound:
+  1. **More API pollers** [wired] — `SELECT … FOR UPDATE SKIP LOCKED` coordinates concurrent claims across pods with **zero new code**.
+  2. **Per-type table for the hot type** — split `event_outbox_<hot>` (e.g. `event_outbox_order_created`) only; cool four keep sharing the general `event_outbox`.
+  3. **`pgmq.send_batch()` unlocks for free at step 2** — every row in the per-type table targets the *same* queue, so the per-queue grouping complexity that motivates ADR-011's per-row default disappears for that table. **ADR-011 + ADR-012 are a coupled design pair**: splitting one flips both.
+  4. **Shard the hot per-type table** by `hash(partner_id) % N` if the per-type heap *also* saturates — same lever as queue-side L5.
+- **Future Kafka swap (ADR-013)** — producer accumulator handles per-topic batching natively; multi-queue grouping problem dissolves entirely.
+- Full rationale + interview framing: **§ Open design decisions › 3. Async processing strategy** › *"Why one outbox today (and when to split per type)"*.
+
 **Capacity planning rule**:
 - Per-worker throughput ≈ `concurrency / handler_p99`. Per-pod = sum across workers. Total = pods × per-pod.
 - Verify before committing 2K: handler p99 (Resilience4j retries push worst case to ~1.5 s); Postgres write capacity (~12K writes/s, WAL fsync limiter); outbox poller drain rate (currently constants, lift to `app.outbox.*`).
@@ -382,7 +399,7 @@ Multi-tenant event gateway: partners → HMAC-SHA256 over HTTPS → durable acce
 | Bottleneck | First lever (cheap) | If insufficient | Last resort |
 |---|---|---|---|
 | Slow handler | profile handler, raise `Semaphore` | add consumer replicas | shard hot queue by partner_id |
-| Outbox poller behind | promote constants to `app.outbox.*`; bigger batch | per-API-pod poller (Stage 2 default) | per-type outbox split (`event_outbox_<hot>`) |
+| Outbox poller behind | promote constants to `app.outbox.*`; bigger batch | per-API-pod poller (Stage 2 default) | per-type outbox split (`event_outbox_<hot>`) — also unlocks `pgmq.send_batch()` |
 | Hot tail-page contention | check L1 first (don't shard prematurely) | `hash(partner_id) % N` shard the saturated queue | migrate that queue to Kafka |
 | DB connection ceiling | `HIKARI_MAX` bump | PgBouncer transaction-mode | dedicated Postgres for pgmq (#16) |
 | WAL fsync ceiling | bigger Postgres / faster disk | `pgmq.send_batch` (ADR-011 lever) | move queue tier off the OLTP DB |

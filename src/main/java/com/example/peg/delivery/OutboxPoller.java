@@ -2,6 +2,7 @@ package com.example.peg.delivery;
 
 import com.example.peg.platform.RuntimeProperties;
 import com.example.peg.query.EventRepository;
+import com.example.peg.query.OutboxRepository;
 import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.jdbc.core.JdbcTemplate;

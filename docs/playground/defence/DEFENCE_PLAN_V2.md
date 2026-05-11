@@ -1,37 +1,8 @@
-# 30-Minute Case Defence Plan v2.3 — Partner Event Gateway
+# 30-Minute Case Defence Plan — Partner Event Gateway
 
-Revised from `DEFENCE_PLAN.md` (v1 → v2 closed the case-coverage gaps from `DEFENCE_PLAN_AUDIT.md`; v2 → v2.1 made NFR coverage explicit; v2.1 → v2.2 added the consume-sequence walkthrough; v2.2 → v2.3 makes Open-design-decision coverage explicit via a closing matrix card paired with the NFR matrix). v2 changes:
+**Layout**: Seg 1 (3 min) · Seg 2 (3 min) · Seg 3 (4 min) · **Seg 3b (1:30)** · Seg 4 (7:30) · Seg 5 (5:30, with 5a/5b/5c/5d sub-beats) · Seg 6 (2 min) · Q&A (3:30) = **30:00 total**.
 
-- Seg 1 names the **five event types** explicitly (Functional Req — Supported Event Types).
-- Seg 2 adds a **30-second ERD walkthrough** (Deliverable 5 — data model).
-- Seg 3 adds explicit **request / event-type validation** beat (Functional Req 2).
-- Seg 4 demo budget is reshuffled: Demo D is split into **D1 (isolation)** + **D2 (querying with pagination + filters)** — this is the biggest gap (Functional Req 5).
-- Seg 4 calls out the **FAILED lifecycle state** explicitly via state-machine diagram + integration test (Functional Req 3 — "failed during processing").
-- Seg 6 covers **assumptions and time spent** as required by the README deliverable.
-
-v2.1 changes:
-
-- Seg 1 names the **case PDF's 7 NFRs verbatim** (Security · Tenant Isolation · Reliability · Idempotency · Concurrency · Availability & Performance · Maintainability) + Auditability as cross-cutting; adds an 8-anchor mechanism map.
-- Every beat in Seg 2, Seg 3, and Seg 4 carries compact **`[NFR]` tags** — interviewer sees coverage explicitly.
-- Seg 5 is **NFR-led**: 5a Availability & Performance · 5b Maintainability · 5c trade-offs · 5d **closing NFR coverage matrix card (~30 sec)**.
-- Q&A rows tagged + 3 NFR-anchored rows appended; Q&A budget tightened 4:00 → 3:30 to absorb the matrix.
-- Cross-link from Seg 1 to `docs/diagrams-summarized/01-architecture.md § NFR coverage` for verbose talking points.
-
-v2.2 changes:
-
-- **Seg 3b consume-sequence walkthrough added (1.5 min, 0:10–0:11:30)** — `04-consume-sequence.md` gets the same dedicated treatment as `03-ingest-sequence.md`. Five points cover pgmq.read claim, two-tx claim/finalize, handler-outside-tx, structural recovery via VT redelivery. Tags `[Rel][Conc][Idem][Aud]`.
-- `04-consume-sequence.md` added to pre-talk browser tabs list.
-- Seg 4 demo budget compressed 9:00 → 7:30: Demo C 1:00 → 0:30, Demo D1 1:00 → 0:30, Demo E 1:00 → 0:30 (FAILED narrative absorbed by Seg 3b).
-
-v2.3 changes (this revision):
-
-- **Seg 5c reframed: "3 trade-offs to defend" → "Open design decisions matrix"** — single 6-row table mapping each case-PDF Open item (Monolith vs microservice · Storage · Async · Retry / error · Observability · Deployment / scaling) to **choice → where addressed → defended trade-off**. Same 1:30 budget; matrix's trade-off column subsumes the old prose-form trade-offs.
-- **Paired closing recap**: Seg 5c (Open decisions matrix) + Seg 5d (NFR coverage matrix) sit adjacent — together they prove dual coverage of case PDF § Open for Your Design Decisions + § Non-Functional Expectations in <2 min.
-- Seg 1 footer adds a parallel cross-link to `01-architecture.md § Open design decisions` (matches the existing NFR coverage cross-link).
-- "If cut short" priority list reframes the closer as `5d + 5c` paired matrices.
-- **No demo cut needed** — swap-not-add design preserves the 7:30 demo budget.
-
-Total time still 30 min. Stable layout: Seg 1 (3) · Seg 2 (3) · Seg 3 (4) · **Seg 3b (1:30)** · Seg 4 (7:30) · Seg 5 (5:30) · Seg 6 (2) · Q&A (3:30).
+Full revision history lives in the changelog tables at the bottom of this file.
 
 ---
 
@@ -246,10 +217,10 @@ File-count answers, no IDE flip needed unless asked:
 |---|---|---|---|---|
 | 1 | **Monolith vs microservice** | Modular monolith, 7 feature modules, same image / 7 runtime modes (ADR-005) | Seg 2 module list; Seg 5b Maintainability | Stage 1 single-image deploy ripples; Stage 2 per-role Deployments roll independently |
 | 2 | **Storage choice** | Postgres only — events + audit + outbox + pgmq queues (ADR-010) | Seg 2 ERD; Seg 3 §4 one-tx; Seg 3b consume | Vendor lock-in embraced — `SKIP LOCKED` + JSONB + pgmq + declarative partitioning carry their weight |
-| 3 | **Async processing strategy** | Outbox → poller (250 ms) → 5 pgmq queues → VT workers + Semaphore (ADR-002, 003, 004) | Seg 3 §5 outbox; Seg 3b consume walkthrough | +250 ms forwarding latency; 5× ops surface; Java 21+ requirement |
+| 3 | **Async processing strategy** | Outbox → poller (250 ms) → 5 pgmq queues → VT workers + Semaphore (ADR-002, 003, 004). **Outbox scaling ladder (Stage 2 evolution)**: more pollers (SKIP LOCKED, wired) → per-type table for hot type → `pgmq.send_batch()` unlocks free → shard by `hash(partner_id) % N` | Seg 3 §5 outbox; Seg 3b consume walkthrough | +250 ms forwarding latency; 5× ops surface. **ADR-011 (per-row send) + ADR-012 (single table) are a coupled pair** — per-row default is a *consequence* of single-table; splitting the table flips both |
 | 4 | **Retry / error handling** | Resilience4j (in-process, 3 × 200 ms + breaker) composed with pgmq redelivery (durable, VT 30 s, `read_ct >= 5` → DLQ) (ADR-009) | Seg 3b §5 recovery; Demo E metrics | Up to 3 × 5 = 15 attempts before DLQ; mitigated by 4xx exclusion + tight in-process budget |
 | 5 | **Observability** | 3 pillars / one trace_id; always-on context, opt-in OTLP export; `TraceContextCarrier` bridges async boundary | Demo A trace_id MDC; Demo E `peg_*` metrics; `/actuator/prometheus` | No log-derived metrics (Loki count queries) — Micrometer counters are the durable interface; no dashboards in repo |
-| 6 | **Deployment / scaling** | Same image / 7 runtime modes (ADR-005); Stage 1 single pod / Stage 2 per-role + KEDA postgres scaler + PgBouncer tx-mode | Seg 5a Availability & Performance | Stage 2 manifests not deployed (per case spec — *"explain how the solution could support"*); cross-region OOS |
+| 6 | **Deployment / scaling** | Same image / 7 runtime modes (ADR-005). **Consumer-side**: Stage 1 single pod / Stage 2 per-role Deployments + KEDA postgres scaler + PgBouncer tx-mode. **Producer-side outbox scaling ladder** (symmetric with consumer-side L5): more API pollers (SKIP LOCKED, wired) → per-type table for hot type → `pgmq.send_batch()` unlocks free at step 2 → shard hot per-type by `hash(partner_id) % N` → Kafka producer accumulator natively per topic (ADR-013) | Seg 5a Availability & Performance; `01-architecture.md § 6 Outbox structure scaling path` | Stage 2 manifests not deployed (per case spec — *"explain how the solution could support"*); cross-region OOS |
 
 > *"All six share four cross-cutting principles: **diagnose first, then pick cheapest lever**; **Postgres-native primitives over distributed-systems infra** when DB scale allows; **two short tx, not one long one** (connections held only across SQL); **explicit binding over magic** (`partner_id` bound on every repo call, no AOP). Verbose: `01-architecture.md § Open design decisions` + `§ Design principles`. Deeper scaling rationale: `08-scaling-and-tradeoffs.md` (5-layer diagnostic + 20-lever ladder) — don't open unless asked."*
 
@@ -310,6 +281,8 @@ Pre-rehearsed answers:
 | Concurrency — race conditions? `[Conc]` | "`SKIP LOCKED` for inter-process coordination; atomic `UPDATE … WHERE status IN (...)` for state transitions, no read-then-write anywhere. Ingest race: `INSERT … ON CONFLICT DO NOTHING` is the backstop, loser re-SELECTs the winner." |
 | HA story if a consumer pod dies mid-message? `[Rel]` | "pgmq VT (30 s) → message reappears → next worker reclaims via `PROCESSING → PROCESSING` rule on `tryMarkProcessing`. Two-tx claim/finalize is what makes that safe; finalize tx never ran on the dead pod, so the row is still in `PROCESSING` for the redelivery to take." |
 | How is a new filter added? `[Maint]` | "Field on `EventQuery`, entry in the `EventSpecifications.SPECS` registry. Demoed in Demo D2." |
+| Why per-row `pgmq.send`, not `pgmq.send_batch`? `[A&P][Maint]` | "`event_outbox` spans **multiple queue destinations** (one row per event type), so `send_batch` would need per-queue grouping + a flush buffer in the poller — Kafka-producer accumulator pattern in miniature. Per-row keeps the drain loop a flat for-each (ADR-011). **But it's coupled to ADR-012**: when one type saturates and we split it into `event_outbox_<hot>`, every row in that table targets the *same* queue → grouping vanishes, `send_batch` unlocks for free. One design step flips both. Full ladder: `01-architecture.md § 6 Outbox structure scaling path`." |
+| How does the outbox itself scale? `[A&P]` | "4-step ladder: (1) more API pollers — SKIP LOCKED handles coordination, zero new code; (2) per-type table for the hot type — `event_outbox_<hot>` only, cool four keep sharing; (3) `send_batch` unlocks for free at step 2; (4) shard the hot per-type table by `hash(partner_id) % N` — same lever as queue-side L5. Future: Kafka producer accumulator handles per-topic batching natively (ADR-013)." |
 | Test coverage? | "JaCoCo-enforced ≥ 80% line coverage. Testcontainers for full submit→outbox→pgmq→consume flow, HMAC reject paths, tenant isolation, DLQ, audit atomicity, **and the FAILED lifecycle path**." |
 
 ---
@@ -375,3 +348,12 @@ If they cut you short, the ranked priorities are: **Seg 1 (framing) > Seg 4 Demo
 | **Seg 1 footer adds parallel cross-link** to `01-architecture.md § Open design decisions` | Matches the existing NFR coverage cross-link; verbose talking points one click away if interviewer drills *why* before Seg 5c lands | Seg 1 footer |
 | "If cut short" priority list reframes closer as `5d + 5c` paired matrices | The two cards together are <2 min and prove coverage of both case-PDF design sections — highest-leverage minute of the talk | Tactical tips |
 | **No demo cut** — swap-not-add design preserves 7:30 demo budget | Matrix's trade-off column subsumes the old prose-form 5c content; user's "cut if needed" was conditional and the swap removes the need | Time budget |
+
+## What changed from v2.3 → v2.4 (producer-side outbox scaling propagation)
+
+| Change | Why | Where |
+|---|---|---|
+| **Seg 5c row 3 (Async processing strategy) enhanced** — choice column now mentions the **outbox scaling ladder** (more pollers → per-type table → send_batch unlocks → shard); trade-off column flags **ADR-011 + ADR-012 as a coupled design pair** | Mirrors the new sub-beat in `01-architecture.md § 6 Outbox structure scaling path` (just added). Closes the doc-vs-interview asymmetry: the doc has prominent producer-side L5 coverage, the defence plan didn't until now | Seg 5c row 3 |
+| **New Q&A row: "Why per-row `pgmq.send`, not `pgmq.send_batch`?"** | The single most interview-strong drill-down on the producer side. Answer reveals the ADR-011/012 coupling — which is the key insight from the recent doc updates. Cross-links to `01-architecture.md § 6` | Q&A buffer |
+| **New Q&A row: "How does the outbox itself scale?"** | Companion to the send_batch question — gives the 4-step ladder verbatim. Producer-side equivalent of the existing queue-side ordering / poison-message / Postgres-HA Q&A coverage | Q&A buffer |
+| **No time-budget change** — Seg 5c matrix row expansion stays within 1:30 budget; Q&A rows fit existing 3:30 | Producer-side story was missing not because of time but because of asymmetry vs queue-side L5 | Time budget |

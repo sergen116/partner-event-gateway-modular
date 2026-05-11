@@ -14,15 +14,21 @@ High-level component diagram of all roles in one JVM (Stage 1) or split per role
 
 ## Module dependency graph (compile-time)
 ```
-ingest → shared, audit, query, delivery, partner, platform
-delivery → shared, audit, query, platform
-query → shared, audit, platform
-partner → shared, platform
-audit → shared, platform
-platform → shared
-shared → ∅
+ingest    → shared, query, partner, platform
+delivery  → shared, query, platform
+query     → shared, audit
+partner   → shared, platform
+audit     → shared
+platform  → shared, query, delivery   (wiring seam — registers worker beans)
+shared    → ∅
 ```
-Acyclic. Audit consumed by ingest/delivery/query (each writes), consumes none.
+Feature modules form an acyclic DAG over `shared`, `query`, `audit`, `partner`.
+`query` is the only module that imports `audit` directly; `ingest` and `delivery`
+get audit writes transitively because `EventRepository` writes them in the same
+transaction as each state transition. `OutboxRepository` lives in `query` (not
+`delivery`), so `ingest` no longer depends on `delivery` — both API-side
+writes (`events`, `event_outbox`) go through one module. Only `delivery`
+(via `OutboxPoller`) imports pgmq.
 
 ## Critical notes
 - **`PartnerAuthFilter`** only on partner endpoints; internal endpoints bypass it (per case spec).

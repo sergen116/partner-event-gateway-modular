@@ -53,21 +53,31 @@ com.example.peg
 **Dependency direction:**
 
 ```
-ingest ─┐
-delivery┼→ shared, audit, platform
-query ──┘    └──→ shared, platform
-partner ────→ shared, platform
+ingest    → shared, query, partner, platform
+delivery  → shared, query, platform
+query     → shared, audit
+partner   → shared, platform
+audit     → shared
+platform  → shared, query, delivery   (wiring seam: registers worker beans)
 ```
 
-`ingest`, `delivery`, and `query` all share the `events` table via
-`query.EventRepository` — that cross-module repository is the only shared-state
-boundary; every other module owns its data. The audit module is consumed by ingest,
-delivery, and query (each writes audit rows) but consumes none of them.
+Feature modules form an acyclic DAG. `query` is the only module that imports
+`audit` directly: every state transition flows through `EventRepository`, which
+writes the audit row in the same transaction, so `ingest` and `delivery` get
+audit writes transitively without taking a direct compile-time dep on `audit`.
+
+`query.EventRepository` and `query.OutboxRepository` are the cross-module write
+seams — `ingest` writes events + outbox via `query`, `delivery` writes events
+state transitions via `query`. Every other module owns its data.
+
+`platform` registers worker beans programmatically
+(`WorkerRegistrationConfig`, `WorkerScheduler`) and so imports `delivery` +
+`query`. This is a wiring seam, not a feature dep.
 
 This shape matters because Stage 2 deploys the modules differently. An API pod runs
 `ingest` + `query` + `partner` + `audit` writes; a consumer pod runs `delivery` +
-`audit` writes. No code change between deployments — only the runtime mode changes
-which beans get instantiated.
+`query` + `audit` writes. No code change between deployments — only the runtime mode
+changes which beans get instantiated.
 
 ## 3. Component breakdown
 
@@ -95,9 +105,9 @@ which beans get instantiated.
 
 ### `delivery` module
 
-- **`OutboxRepository` + `OutboxPoller`** — drain `event_outbox` into pgmq via
-  `FOR UPDATE SKIP LOCKED`. Rows are deleted on successful send — see
-  [ADR-006](#adr-006-outbox-delete-on-send),
+- **`OutboxPoller`** — drains `event_outbox` into pgmq via `FOR UPDATE SKIP LOCKED`,
+  using `query.OutboxRepository` for the JDBC reads/writes. Rows are deleted on
+  successful send — see [ADR-006](#adr-006-outbox-delete-on-send),
   [ADR-012](#adr-012-single-event_outbox-table-not-split-per-event-type).
 - **`PgmqWorker`** (base) + 5 per-event-type subclasses. Each polls one pgmq queue,
   fans batch processing across virtual threads bounded by a Semaphore, enforces a
@@ -121,6 +131,10 @@ which beans get instantiated.
   state-transition methods write an audit row inside the same transaction. Writes
   use the primary `JdbcTemplate`; `query()` and `count()` use a separate `readJdbc`
   bound to the read replica when configured (see [§ Read/write split](#readwrite-split)).
+- **`OutboxRepository`** — JDBC accessor for the `event_outbox` table. Lives here
+  (not in `delivery`) so `ingest` can write the outbox row in the same transaction
+  as the events row without taking a compile-time dep on the delivery layer.
+  `delivery.OutboxPoller` reads/claims/deletes through this repository.
 - **`EventQuery`** — extensible filter specification (partner, type, status, date
   range, business ref, processing outcome).
 - **`EventSpecifications`** — composable filter compilation. Adding a filter is one

@@ -3,7 +3,7 @@ package com.example.peg.ingest;
 import com.example.peg.platform.TraceContextCarrier;
 import com.example.peg.shared.EventRecord;
 import com.example.peg.shared.PartnerEventMessage;
-import com.example.peg.delivery.OutboxRepository;
+import com.example.peg.query.OutboxRepository;
 import com.example.peg.query.EventRepository;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;

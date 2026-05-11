@@ -1,6 +1,6 @@
 package com.example.peg.ingest;
 
-import com.example.peg.delivery.OutboxRepository;
+import com.example.peg.query.OutboxRepository;
 import com.example.peg.query.EventRepository;
 import com.example.peg.shared.EventRecord;
 import com.example.peg.shared.EventStatus;

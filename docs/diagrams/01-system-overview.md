@@ -117,34 +117,45 @@ between modules is much simpler:
 ```mermaid
 flowchart LR
     ingest --> shared
-    ingest --> audit
     ingest --> query
-    ingest --> delivery
     ingest --> partner
     ingest --> platform
 
     delivery --> shared
-    delivery --> audit
     delivery --> query
     delivery --> platform
 
     query --> shared
     query --> audit
-    query --> platform
 
     partner --> shared
     partner --> platform
 
     audit --> shared
-    audit --> platform
 
     platform --> shared
+    platform --> query
+    platform --> delivery
 ```
 
-`shared` has no dependencies; `audit` depends only on `shared` + `platform`.
+`shared` has no dependencies. `audit` depends only on `shared`. `query` is the
+only module that imports `audit` directly — every state transition flows through
+`EventRepository`, which writes the audit row in the same transaction, so
+`ingest` and `delivery` get audit-write behaviour transitively without taking a
+direct compile-time dep.
+
+`ingest` no longer imports `delivery`: `OutboxRepository` lives in `query`
+alongside `EventRepository`, so the API write path (`events` row + `event_outbox`
+row) goes through one module. Only `delivery` (via `OutboxPoller`) imports pgmq.
+
+`platform` registers worker beans programmatically (`WorkerRegistrationConfig`,
+`WorkerScheduler`) and so depends on `delivery` + `query`. This is a wiring
+seam, not a feature dep — the feature modules above remain a clean DAG over
+`shared`, `query`, `audit`, `partner`.
+
 Every feature module is consumable independently — Stage 2 deploys API pods
-with `ingest` + `query` + `partner` and consumer pods with `delivery`. Both
-roles include `audit` and `platform`.
+with `ingest` + `query` + `partner` and consumer pods with `delivery` +
+`query`. Both roles include `audit` and `platform`.
 
 ## Notes
 

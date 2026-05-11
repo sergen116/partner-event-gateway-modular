@@ -1,5 +1,6 @@
 package com.example.peg.delivery;
 
+import com.example.peg.query.OutboxRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
