@@ -39,7 +39,6 @@ Multi-tenant event gateway: partners → HMAC-SHA256 over HTTPS → durable acce
 - **Authorization** — HMAC-SHA256 over canonical bytes (`partnerId\ntimestamp\nMETHOD\npath\nbody`); field order/separators/uppercase method must match exactly
 - **Stored credential ≠ raw secret** — DB holds `SHA-256(secret)` (hex). Both sides arrive at the same HMAC key by forward computation; SHA-256 never reversed
 - **Anti-replay** — timestamp **inside** signed message + ±5 min skew (HMAC alone does NOT provide replay protection)
-- **Constant-time compare** — `MessageDigest.isEqual` (not `Arrays.equals` — short-circuits and leaks timing)
 - **Secret rotation** — `previous_secret_hash` + `previous_secret_expires_at`; HMAC verify failure on cached partner → invalidate Caffeine entry → reload from DB → retry once. Absorbs rotation windows without operator intervention.
 - **Surface scoping** — `PartnerAuthFilter` only on `/api/v1/events*`; observability + `/api/v1/internal/**` deliberately not exposed publicly (path-based separation, not auth-based)
 - **Validation** — `@Valid` on DTO; `EventType` enum closes payload to the 5 supported types; `partner_id` always from auth context, never from body
@@ -59,12 +58,11 @@ Multi-tenant event gateway: partners → HMAC-SHA256 over HTTPS → durable acce
 ### 3. Reliability
 > *Case: accepted events should not be lost because of application failure, retries, timeouts, or temporary internal failures.*
 
-- **Outbox atomicity (ADR-002)** — events INSERT + outbox INSERT + audit INSERT in one tx. Crash before `pgmq.send` is recoverable; **partner sees 200 OK before pgmq is touched** — the durability contract is "we have it in Postgres", not "the queue accepted it"
-- **pgmq visibility timeout** — worker crash mid-processing leaves row PROCESSING (claim tx committed; finalize tx never ran). pgmq redelivers after VT (30 s); next worker reclaims via `PROCESSING → PROCESSING` rule on `tryMarkProcessing`
+- **Outbox atomicity (ADR-002) - No Dual-write ** — events INSERT + outbox INSERT + audit INSERT in one tx. Crash before `pgmq.send` is recoverable; **partner sees 200 OK before pgmq is touched** — the durability contract is "we have it in Postgres", not "the queue accepted it"
+- **MID-PROCESS - pgmq visibility timeout** — worker crash mid-processing leaves row PROCESSING (claim tx committed; finalize tx never ran). pgmq redelivers after VT (30 s); next worker reclaims via `PROCESSING → PROCESSING` rule on `tryMarkProcessing`
 - **Post-PROCESSED race** — SIGKILL between Tx 2 commit (PROCESSED) and `pgmq.delete` → row PROCESSED in DB but pgmq still has the message. On redelivery `tryMarkProcessing` matches no row → silent skip → `pgmq.delete`. One predicate handles claim + already-done.
 - **DLQ (ADR-009)** — `read_ct >= maxAttempts (5)` → `pgmq.archive` + events row marked FAILED + audit row. Forensic data lives in BOTH places (`pgmq.a_events_*` + `events WHERE status='FAILED'`). Replay = re-INSERT outbox row from archive.
 - **Downstream resilience (ADR-009)** — Resilience4j `@Retry` (3 × 200 ms exponential) + `@CircuitBreaker` (50% failure rate, 20-call sliding window, opens 10 s, auto half-open). Total in-process budget ≪ pgmq VT-5s deadline (25 s). 4xx excluded from retry-exceptions so caller bugs fail fast.
-- **Two retry layers, composed not stacked** — Resilience4j (fast, in-process, transient blips) + pgmq redelivery (slow, durable, sustained outages). Fallback rethrows so pgmq's outer budget keeps applying. `DownstreamCallService` must stay a separate bean (Spring AOP doesn't intercept self-invocation).
 - **Graceful shutdown** — workers flip `running` flag in `@PreDestroy`, drain VT executor up to VT seconds; in-flight handlers complete naturally to protect the delete/archive step. Loop exits within one sleep cycle.
 - **Batch deadline below VT** — `CompletableFuture.allOf(...).orTimeout(VT-5s = 25s)`. On timeout we **don't** cancel in-flight tasks — letting them finish delete/archive is safer than risking double-delete.
 - **Logged pgmq tables** — `pgmq.create_partitioned`, NOT `create_unlogged`. UNLOGGED tables are TRUNCATEd on crash recovery → combined with delete-on-send (ADR-006) the queue would be the **only surviving copy** of in-flight messages, which would also wipe DLQ archives (`pgmq.a_*` inherits the setting). Logged buys: crash-survivable in-flight, DLQ integrity, replication / PITR, viable `DROP PARTITION` retention. Cost: WAL fsync per send (~0.5–2 ms) — hidden behind the 250 ms poll cadence.
@@ -104,16 +102,25 @@ Multi-tenant event gateway: partners → HMAC-SHA256 over HTTPS → durable acce
 #### High availability
 - **Stateless API + stateless workers** — pod loss never strands work; durable state is in Postgres only (queues are Postgres tables too)
 - **Same image, 7 runtime modes (ADR-005)** — `APP_RUNTIME_MODE` selects role. Stage 1→2 is config-only; no per-role builds, no code change to split API and consumer pods
-- **(Stage 1) Single Postgres failure domain ** — explicit limit. Production HA = managed Postgres (RDS / CloudSQL) + read replica + automated failover; cross-region DR out of scope per case spec.
+- **Production HA = managed Postgres (RDS / CloudSQL) + read replica + automated failover; cross-region DR out of scope per case spec.
 - **(Stage 2) Broker-outage tolerance (ADR-002 + ADR-013)** — outbox decouples the partner-facing API from the broker. If pgmq (Stage 1) or Kafka (Stage 2 swap) goes down, ingest still returns 200: events INSERT + outbox INSERT commit to Postgres. Backlog accumulates in `event_outbox`; when the broker recovers, `OutboxPoller` drains it automatically. Partners see no failure, no manual replay needed.
 
 #### Growing traffic
 - **Per-event-type queues (ADR-003)** — high-volume types scale independently of low-volume types; no head-of-line blocking. Cost: 5× ops surface (5 queues, 5 worker classes, 5 dashboards) — negligible at Stage 1.
+- **Adding more Stateless API + stateless workers**
+- **Hot-outbox table split** 
+  - High lock contention.
+  - Hot table competing with (ingest + DELETE-on-send) churn
+  - Single-table throughput bottleneck.
+  - DELETE I/O and table fragmentation. ------- (OR update outbox.status and make partition + retention INSTEAD OF --- DELETING)
+  - PARTITIONED OUTBOX TABLE without delete --- delete old partitions with retention 
+- **Outbox scaling ladder** (cheap → expensive) when load grows past the current bound:
+  - **More pollers first** (already wired) — add API pod replicas. Each pod runs its own `OutboxPoller`; `SELECT … FOR UPDATE SKIP LOCKED` coordinates concurrent claims across pods with **zero new code**. Contention stays row-level, not page-level.
+  - **Per-type table for the hot type** (Stage 2 evolution, **not deployed**) — when *one* type's volume crosses the per-heap ceiling (three symptoms: tail-page lock contention across all API-pod pollers, autovacuum I/O on the hot table competing with ingest, DELETE-on-send churn dominating the table), split that one into its own table — `event_outbox_order_created` for example. Cool four keep sharing `event_outbox`. Symmetric with the queue-side L5 fix.
+  - **`pgmq.send_batch()` unlocks for free at step 2** — every row in `event_outbox_order_created` targets the *same* pgmq queue, so the per-queue grouping complexity that motivates ADR-011's per-row default **disappears for that one table**. Drain loop becomes `pgmq.send_batch(queue, batch)` — one round-trip per batch instead of N. **This reveals ADR-011 + ADR-012 as a coupled design pair**: the per-row default is a *consequence* of the single-table default; splitting the table flips both at once.
+  - **Shard the hot per-type table** by `hash(partner_id) % N` if the per-type heap *also* saturates — same shard key as queue-side. Same lever applied one layer up.
 - **KEDA postgres scaler** — drives HPA per consumer Deployment from `pgmq.metrics().queue_length`. Per-queue `targetQueryValue` tunes profile (high-volume: 500 backlog/pod; latency-sensitive `order-cancelled`: 50). **Cost goes where load goes.**
-- **PgBouncer configuration** PgBouncer multiplexes those onto a small backend pool (50) at the Postgres side  
-- **Stage 2 sizing for 2K TPS sustained** — 14 consumer pods + 3 API pods → ~2130 msg/s (per-queue replica/concurrency table in `07-stage2-topology.md`). 3 API pods × `HIKARI_MAX=12` for ingest at the same TPS.
-- **Stage 1 ceiling** — single `CONSUMER_ALL` pod ≈ 400 msg/s. Aggressive tuning (104 slots, `HIKARI_MAX=120`, outbox 200 msg / 100 ms) absorbs **short** 2K peaks but **every dimension of headroom collapses to one process** — single failure domain, no surgical scaling, 120+ connections without PgBouncer, single outbox poller. 2K TPS sustained = multi-pod target.
-- **Assumptions to verify before committing 2K** — handler p99 ≤ 100 ms (Resilience4j retries push worst-case to ~1.5 s on transient failures, which collapses effective concurrency); Postgres ~12K writes/sec (`pgbench -j 8 -c 32 -T 60`; WAL fsync is the limiter); outbox poller promoted from constants to `app.outbox.*` (lever #5); PgBouncer multiplexes ~350 clients → 50–80 backends; KEDA manifests deployed.
+- **PgBouncer configuration** PgBouncer multiplexes those onto a small backend pool (50) at the Postgres side
 - **5-layer scaling diagnostic** — name the symptom first. Pick cheapest lever that targets it; don't reach for #18 when #1 isn't tried (`08-scaling-and-tradeoffs.md`).
   - `L1 consumer throughput` - raise Semaphore, add replicas, profile handler
   - `L2 pickup latency` - long-polling via pgmq.read_with_poll for idle-queue pickup; tune busy-poll-interval-ms for hot queues
@@ -123,20 +130,7 @@ Multi-tenant event gateway: partners → HMAC-SHA256 over HTTPS → durable acce
   - `L4 DB tier` - PgBouncer, read replica, index audit, vacuum tuning
   - `L5 single hot type` 
     - shard the saturated queue by hash(partner_id) % N; 
-    - eventually swap that one to Kafka
-    
-- **L5 escape hatch** — single saturated queue ≠ blanket fix. 
-  - Shard *that one* queue by `hash(partner_id) % N` (lever #18). Partner-id key preserves per-tenant ordering and keeps all N shards hot in parallel (random breaks ordering; time-based rotates one at a time = same hot-tail problem). 
-  - `Kafka replacement` Eventually swap that one queue to Kafka (lever #19); outbox is the seam that keeps swap cheap (ADR-013).
-- **Hot-outbox split — the producer-side mirror of L5** — same shape as queue-side sharding, applied one layer up. When one type dominates outbox writes (three symptoms: tail-page lock contention across pods, autovacuum I/O on the hot table competing with ingest, DELETE-on-send churn dominating the table), split *that one* type into its own table (`event_outbox_order_created`); leave the cool four sharing `event_outbox`. If the per-type heap saturates too, apply `hash(partner_id) % N` to the split table — same shard key as queue-side. Full rationale: ADR-012 § Stage 2 evolution + § Open design decisions › 3 *Why one outbox today (and when to split per type)*.
-  - High lock contention.
-  - Single-table throughput bottleneck.
-  - DELETE I/O and table fragmentation. ------- (OR update outbox.status and make partition + retention INSTEAD OF --- DELETING)
-- **Outbox scaling ladder** (cheap → expensive) when load grows past the current bound:
-  - **More pollers first** (already wired) — add API pod replicas. Each pod runs its own `OutboxPoller`; `SELECT … FOR UPDATE SKIP LOCKED` coordinates concurrent claims across pods with **zero new code**. Contention stays row-level, not page-level.
-  - **Per-type table for the hot type** (Stage 2 evolution, **not deployed**) — when *one* type's volume crosses the per-heap ceiling (three symptoms: tail-page lock contention across all API-pod pollers, autovacuum I/O on the hot table competing with ingest, DELETE-on-send churn dominating the table), split that one into its own table — `event_outbox_order_created` for example. Cool four keep sharing `event_outbox`. Symmetric with the queue-side L5 fix.
-  - **`pgmq.send_batch()` unlocks for free at step 2** — every row in `event_outbox_order_created` targets the *same* pgmq queue, so the per-queue grouping complexity that motivates ADR-011's per-row default **disappears for that one table**. Drain loop becomes `pgmq.send_batch(queue, batch)` — one round-trip per batch instead of N. **This reveals ADR-011 + ADR-012 as a coupled design pair**: the per-row default is a *consequence* of the single-table default; splitting the table flips both at once.
-  - **Shard the hot per-type table** by `hash(partner_id) % N` if the per-type heap *also* saturates — same shard key as queue-side. Same lever applied one layer up.
+    - `Kafka replacement` eventually swap that one to Kafka
 
 #### Efficient reads/writes
 - **Partition pruning** — `events`, `event_audit_log` partitioned monthly by `created_at` / `occurred_at`; pgmq queues + DLQ partitioned daily. Date-bounded queries skip cold partitions. **Internal controllers default last 90 days** when neither `from` nor `to` set so unfiltered queries don't scan all 12 months.
@@ -159,15 +153,12 @@ Multi-tenant event gateway: partners → HMAC-SHA256 over HTTPS → durable acce
 > *Case: the system should be reasonably extensible for new event types, filters, and future evolution.*
 
 - **Module separation** — `ingest` writes only to `events` + `event_outbox`; only `delivery` imports pgmq. New event type touches `delivery/` only — `ingest/` is unchanged. Also enables ADR-013 broker swap with no ingest impact.
-- **Acyclic module DAG** — every module's deps documented in `package-info.java`. ArchUnit-style enforcement is one test away.
 - **Stage 1 → Stage 2 = one env var** — same image, role chosen by `APP_RUNTIME_MODE`. App code, image, schema, migrations, metrics, API contract are identical between stages.
 - **Add a new event type** — 5 small files: `EventType` enum value + Flyway migration creating `pgmq.q_events_<type>` + `PgmqWorker` subclass + `app.consumer.concurrency` entry + handler. `ingest/` unchanged.
 - **Add a new query filter** — 2 lines: one field on `EventQuery` + one entry in `EventSpecifications.SPECS`. ADR-007.
 - **Add a new runtime mode** — 1 enum value + 1 switch arm in `RuntimeProperties` + 1 Deployment manifest.
-- **Audit history of any event** — `AuditLogger.historyFor(partnerId, eventId)`. One call.
 - **Incident isolation (ADR-002)** — Kafka outage → outbox row stays put → partners unaffected. Recovery of processsing layer automatic when kafka returns.
 - **Broker future-proofing (ADR-013)** — `event_outbox` schema has zero pgmq dependency. Kafka swap rewrites only `OutboxPoller.sendToPgmq` + `PgmqWorker`; ingest path and tests unchanged. The outbox's *table* is the durable seam — the *poller* is throwaway code.
-- **SpecificationExecutor** — devs reaching for `JpaSpecificationExecutor` need to read the registry once. Mitigated by 5-line implementation + this doc.
 
 ### Auditability  *(case spec FR-6, not strictly an NFR — kept here because every architectural choice serves it)*
 > *Case: trace what happened to an event — when received, which partner, type, current state, success/fail.*
@@ -211,7 +202,9 @@ Multi-tenant event gateway: partners → HMAC-SHA256 over HTTPS → durable acce
 
 **Why Postgres for OLTP data**:
 - Events + audit + partners are transactional, indexed, partition-friendly — Postgres is best-in-class for that shape.
-- JSONB for partner-defined `payload` keeps schema flexibility without giving up SQL queryability or constraints.
+- JSONB for partner-defined `payload` 
+  - keeps schema flexibility without giving up SQL queryability or constraints.
+  - JSONB + GIN indexes cover schemaless-payload querying.
 - Native declarative partitioning, partial indexes, and `SKIP LOCKED` are exploited throughout — these aren't peripheral features, they carry weight.
 
 **Why pgmq for the queue (not Kafka / SQS / Redis)**:
@@ -337,6 +330,11 @@ Multi-tenant event gateway: partners → HMAC-SHA256 over HTTPS → durable acce
 - No log-derived metrics (Loki count queries) — slow + brittle. Micrometer counters are the durable interface.
 - No dashboards in repo — deploy-target-specific. Alerts and metric shapes are what we own.
 
+####################################################################################################
+####################################################################################################
+########################## `BURAYA KADAR !!!!!!!` ####################################################
+####################################################################################################
+####################################################################################################
 ### 6. Deployment / scaling approach
 > *Case: "deployment/scaling approach"*
 
